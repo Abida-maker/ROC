@@ -54,7 +54,7 @@ def haal_cbs_data_op():
     }
 
     try:
-        antwoord = requests.get(url, params=params, timeout=15)
+        antwoord = requests.get(url, params=params, timeout=3)
         antwoord.raise_for_status()
         records = antwoord.json().get("value", [])
 
@@ -140,7 +140,7 @@ def haal_duo_data_op():
     params = {"id": "wpoadvies-v1"}
 
     try:
-        antwoord = requests.get(url, params=params, timeout=15)
+        antwoord = requests.get(url, params=params, timeout=3)
         antwoord.raise_for_status()
         package = antwoord.json().get("result", {})
         bronnen = package.get("resources", [])
