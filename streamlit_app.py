@@ -1,4 +1,4 @@
 import streamlit as st
 
 st.title("Onze eerste Streamlit app")
-st.write("Top het is ons gelukt!")
+st.write("Ik ga bidden")
