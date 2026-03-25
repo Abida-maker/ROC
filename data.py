@@ -42,7 +42,7 @@ SCHOOLJAREN = ["2018-2019", "2019-2020", "2020-2021", "2021-2022", "2022-2023", 
 # 1. CBS data ophalen - inkomen, niet-westerse achtergrond etc.
 # ---------------------------------------------------------------
 
-@st.cache_data
+@st.cache_data(ttl=86400)
 def haal_cbs_data_op():
     # CBS OData v4 API - Kerncijfers Wijken en Buurten 2024 (tabel 85984NED)
     # We filteren op Amsterdam wijken (code begint met WK0363)
@@ -54,7 +54,7 @@ def haal_cbs_data_op():
     }
 
     try:
-        antwoord = requests.get(url, params=params, timeout=3)
+        antwoord = requests.get(url, params=params, timeout=10)
         antwoord.raise_for_status()
         records = antwoord.json().get("value", [])
 
@@ -132,7 +132,7 @@ def maak_cbs_nooddata():
 # 2. DUO data ophalen - schooladviezen per school per jaar
 # ---------------------------------------------------------------
 
-@st.cache_data
+@st.cache_data(ttl=86400)
 def haal_duo_data_op():
     # DUO Open Onderwijsdata - dataset wpoadvies-v1
     # API documentatie: https://onderwijsdata.duo.nl/api/3/action/
@@ -140,7 +140,7 @@ def haal_duo_data_op():
     params = {"id": "wpoadvies-v1"}
 
     try:
-        antwoord = requests.get(url, params=params, timeout=3)
+        antwoord = requests.get(url, params=params, timeout=10)
         antwoord.raise_for_status()
         package = antwoord.json().get("result", {})
         bronnen = package.get("resources", [])
@@ -149,7 +149,7 @@ def haal_duo_data_op():
         csv_bestanden = [b for b in bronnen if b.get("format", "").upper() == "CSV"]
         if len(csv_bestanden) > 0:
             nieuwste = sorted(csv_bestanden, key=lambda x: x.get("name", ""), reverse=True)[0]
-            csv_antwoord = requests.get(nieuwste["url"], timeout=30)
+            csv_antwoord = requests.get(nieuwste["url"], timeout=100)
             csv_antwoord.raise_for_status()
 
             from io import StringIO
@@ -255,7 +255,7 @@ def maak_duo_nooddata():
 # 3. Gecombineerde dataset maken
 # ---------------------------------------------------------------
 
-@st.cache_data
+@st.cache_data(ttl=86400)
 def laad_alle_data():
     # data ophalen van de drie bronnen
     cbs_df, cbs_bron = haal_cbs_data_op()
