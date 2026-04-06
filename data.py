@@ -44,17 +44,19 @@ SCHOOLJAREN = ["2018-2019", "2019-2020", "2020-2021", "2021-2022", "2022-2023", 
 
 @st.cache_data(ttl=86400)
 def haal_cbs_data_op():
-    # CBS OData v4 API - Kerncijfers Wijken en Buurten 2024 (tabel 85984NED)
+    # CBS OData v3 API - Kerncijfers Wijken en Buurten 2024 (tabel 85984NED)
     # We filteren op Amsterdam wijken (code begint met WK0363)
-    url = "https://odata4.cbs.nl/CBS/85984NED/TypedDataSet"
+    # Bron: https://opendata.cbs.nl/ODataApi/odata/85984NED/TypedDataSet
+    # (odata4.cbs.nl doet het niet meer; v3 via opendata.cbs.nl werkt wel)
+    url = "https://opendata.cbs.nl/ODataApi/odata/85984NED/TypedDataSet"
     params = {
-        "$filter": "startswith(RegioS,'WK0363')",
+        "$filter": "startswith(WijkenEnBuurten,'WK0363')",
         "$format": "json",
         "$top": 200
     }
 
     try:
-        antwoord = requests.get(url, params=params, timeout=10)
+        antwoord = requests.get(url, params=params, timeout=20)
         antwoord.raise_for_status()
         records = antwoord.json().get("value", [])
 
@@ -62,26 +64,41 @@ def haal_cbs_data_op():
             df = pd.DataFrame(records)
             # kolommen hernoemen zodat we ze makkelijk kunnen gebruiken
             hernoem = {}
+            al_gebruikt = set()  # voorkomt dat twee kolommen dezelfde naam krijgen
             for kolom in df.columns:
                 k = kolom.lower()
-                if kolom == "RegioS":
-                    hernoem[kolom] = "wijk_code"
-                elif "inkomen" in k and "gemiddeld" in k:
-                    hernoem[kolom] = "gem_inkomen"
+                nieuwe_naam = None
+                # CBS v3: regio-veld heet WijkenEnBuurten; v4 gebruikt RegioS
+                if kolom in ("RegioS", "WijkenEnBuurten"):
+                    nieuwe_naam = "wijk_code"
+                elif "inkomen" in k and "gemiddeld" in k and "ontvanger" in k:
+                    nieuwe_naam = "gem_inkomen"  # GemiddeldInkomenPerInkomensontvanger
                 elif "inwoners" in k and "aantal" in k:
-                    hernoem[kolom] = "aantal_inwoners"
-                elif "nietwester" in k.replace(" ", "") or ("niet" in k and "wester" in k):
-                    hernoem[kolom] = "pct_niet_westers"
-                elif "bijstand" in k or ("uitkering" in k and "relatief" in k):
-                    hernoem[kolom] = "pct_uitkering"
-                elif "laag" in k and "opleiding" in k:
-                    hernoem[kolom] = "pct_laag_opgeleid"
-                elif "hoog" in k and "opleiding" in k:
-                    hernoem[kolom] = "pct_hoog_opgeleid"
+                    nieuwe_naam = "aantal_inwoners"
+                elif "nietwester" in k.replace(" ", "").replace("-", "") or \
+                     ("buiten" in k and "europa" in k):
+                    nieuwe_naam = "pct_niet_westers"
+                elif "bijstand" in k or ("uitkering" in k and "relatief" in k) or \
+                     ("bijstand" in k and "personen" in k):
+                    nieuwe_naam = "pct_uitkering"
+                elif ("basisonderwijs" in k or "vmbo" in k or "mbo1" in k) and \
+                     ("laag" in k or "basis" in k or "vmbo" in k):
+                    nieuwe_naam = "pct_laag_opgeleid"
+                elif ("hbo" in k or "wo" in k) and ("hoog" in k or "hbo" in k):
+                    nieuwe_naam = "pct_hoog_opgeleid"
                 elif "woz" in k and "gemiddeld" in k:
-                    hernoem[kolom] = "gem_woz"
+                    nieuwe_naam = "gem_woz"
+                if nieuwe_naam and nieuwe_naam not in al_gebruikt:
+                    hernoem[kolom] = nieuwe_naam
+                    al_gebruikt.add(nieuwe_naam)
             df = df.rename(columns=hernoem)
-            return df, "Live data van CBS OData API"
+
+            # verwijder dubbele wijk_code kolom als die er is (RegioS en WijkenEnBuurten
+            # kunnen allebei aanwezig zijn in sommige CBS-versies)
+            if df.columns.duplicated().any():
+                df = df.loc[:, ~df.columns.duplicated()]
+
+            return df, "Live data van CBS OData API (v3 — opendata.cbs.nl)"
 
     except Exception as fout:
         pass  # als de API niet werkt gaan we door naar de nooddata
@@ -267,9 +284,25 @@ def laad_alle_data():
         duo_df  = maak_duo_nooddata()
         duo_bron = "Eigen data (live DUO data heeft andere structuur dan verwacht)"
 
-    # als cbs_df geen wijk_naam heeft (bij live data), voegen we die toe
-    if "wijk_naam" not in cbs_df.columns:
-        extra = maak_cbs_nooddata()[["wijk_code", "wijk_naam", "stadsdeel", "lat", "lon"]]
+    # De CBS live API gebruikt een ander wijk-code formaat (bijv. 'WK0363AA') dan
+    # onze nooddata (bijv. 'WK036300'). Daardoor mislukt de koppeling met DUO-data.
+    # We controleren dit door te kijken of de CBS wijk_codes overeenkomen met DUO.
+    nooddata = maak_cbs_nooddata()
+    duo_wijken = set(duo_df["wijk_code"].unique())
+    cbs_wijken = set(cbs_df["wijk_code"].str.strip() if "wijk_code" in cbs_df.columns else [])
+    overlap = len(duo_wijken & cbs_wijken)
+    if overlap == 0:
+        # geen overlap → live CBS codes zijn incompatibel met onze data → gebruik nooddata
+        cbs_df = nooddata
+        cbs_bron = "Eigen data (CBS wijk-codes komen niet overeen met DUO-data)"
+
+    # als cbs_df geen wijk_naam/stadsdeel/lat/lon heeft, voeg die toe vanuit nooddata
+    ontbrekende_kolommen = [
+        k for k in ["wijk_naam", "stadsdeel", "lat", "lon"]
+        if k not in cbs_df.columns
+    ]
+    if ontbrekende_kolommen:
+        extra = nooddata[["wijk_code"] + ontbrekende_kolommen]
         cbs_df = cbs_df.merge(extra, on="wijk_code", how="left")
 
     # percentages per wijk × jaar × adviestype berekenen

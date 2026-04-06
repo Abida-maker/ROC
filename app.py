@@ -270,6 +270,18 @@ with tab2:
     if "pct_hoog_advies" in wijken_gefilterd.columns and "lat" in wijken_gefilterd.columns:
         kaart_df = wijken_gefilterd.dropna(subset=["lat", "lon", "pct_hoog_advies"])
 
+        # hover_data alleen opnemen als de kolom ook echt bestaat
+        kaart_hover = {
+            "stadsdeel": True,
+            "pct_hoog_advies": ":.1f",
+            "pct_laag_advies": ":.1f",
+            "gem_inkomen": True,
+            "lat": False,
+            "lon": False,
+        }
+        if "pct_niet_westers" in kaart_df.columns:
+            kaart_hover["pct_niet_westers"] = True
+
         fig_kaart = px.scatter_map(
             kaart_df,
             lat="lat",
@@ -278,15 +290,7 @@ with tab2:
             size="pct_hoog_advies",
             size_max=35,
             hover_name="wijk_naam",
-            hover_data={
-                "stadsdeel": True,
-                "pct_hoog_advies": ":.1f",
-                "pct_laag_advies": ":.1f",
-                "gem_inkomen": True,
-                "pct_niet_westers": True,
-                "lat": False,
-                "lon": False,
-            },
+            hover_data=kaart_hover,
             color_continuous_scale="RdYlGn",
             range_color=[0, 70],
             map_style="carto-positron",
@@ -369,14 +373,13 @@ with tab3:
             # Pearson correlatie berekenen
             r, p = stats.pearsonr(scatter_df["gem_inkomen"], scatter_df["pct_hoog_advies"])
 
-            fig_scatter = px.scatter(
-                scatter_df,
+            # size en hover_data alleen als pct_niet_westers beschikbaar is
+            scatter_kwargs = dict(
                 x="gem_inkomen",
                 y="pct_hoog_advies",
                 color="stadsdeel",
-                size="pct_niet_westers",
                 hover_name="wijk_naam",
-                hover_data={"gem_inkomen": True, "pct_hoog_advies": True, "pct_niet_westers": True},
+                hover_data={"gem_inkomen": True, "pct_hoog_advies": True},
                 trendline="ols",
                 trendline_scope="overall",
                 title="Inkomen vs. % hoog schooladvies per wijk",
@@ -387,6 +390,11 @@ with tab3:
                 },
                 height=450,
             )
+            if "pct_niet_westers" in scatter_df.columns and scatter_df["pct_niet_westers"].notna().any():
+                scatter_kwargs["size"] = "pct_niet_westers"
+                scatter_kwargs["hover_data"]["pct_niet_westers"] = True
+
+            fig_scatter = px.scatter(scatter_df, **scatter_kwargs)
             st.plotly_chart(fig_scatter, width="stretch")
 
             ster = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "niet significant"
@@ -505,8 +513,12 @@ with tab4:
             )
         )
         bijstelling["pct_bijgesteld"] = (bijstelling["bijgesteld"] / bijstelling["totaal"] * 100).round(1)
+        # pct_niet_westers alleen opnemen als de kolom beschikbaar is
+        bijstelling_merge_kolommen = ["wijk_naam", "gem_inkomen"]
+        if "pct_niet_westers" in wijken_df.columns:
+            bijstelling_merge_kolommen.append("pct_niet_westers")
         bijstelling = bijstelling.merge(
-            wijken_df[["wijk_naam", "gem_inkomen", "pct_niet_westers"]],
+            wijken_df[bijstelling_merge_kolommen],
             on="wijk_naam", how="left"
         )
         bijstelling = bijstelling.sort_values("pct_bijgesteld", ascending=False)
@@ -553,67 +565,76 @@ with tab5:
 
     st.markdown("---")
 
+    # controleer of pct_niet_westers beschikbaar is voor deze tab
+    heeft_nw = "pct_niet_westers" in wijken_df.columns and wijken_df["pct_niet_westers"].notna().any()
+
     col1, col2 = st.columns(2)
 
     with col1:
-        scatter2_df = wijken_gefilterd.dropna(subset=["pct_niet_westers", "pct_hoog_advies"])
-        if len(scatter2_df) >= 3:
-            r2, p2 = stats.pearsonr(scatter2_df["pct_niet_westers"], scatter2_df["pct_hoog_advies"])
-            fig_nw = px.scatter(
-                scatter2_df,
-                x="pct_niet_westers",
-                y="pct_hoog_advies",
-                color="stadsdeel",
-                hover_name="wijk_naam",
-                trendline="ols",
-                trendline_scope="overall",
-                title="% Niet-westers vs. % hoog schooladvies",
-                labels={
-                    "pct_niet_westers": "% Niet-westerse achtergrond",
-                    "pct_hoog_advies": "% Hoog advies (HAVO+)",
-                },
-                height=400,
-            )
-            st.plotly_chart(fig_nw, width="stretch")
-            ster2 = "***" if p2 < 0.001 else "**" if p2 < 0.01 else "*" if p2 < 0.05 else "niet significant"
-            st.info(f"Correlatie: r = {r2:.3f} | p = {p2:.4f} ({ster2})")
+        if not heeft_nw:
+            st.info("Kolom '% niet-westers' is niet beschikbaar in de huidige CBS-data.")
+        else:
+            scatter2_df = wijken_gefilterd.dropna(subset=["pct_niet_westers", "pct_hoog_advies"])
+            if len(scatter2_df) >= 3:
+                r2, p2 = stats.pearsonr(scatter2_df["pct_niet_westers"], scatter2_df["pct_hoog_advies"])
+                fig_nw = px.scatter(
+                    scatter2_df,
+                    x="pct_niet_westers",
+                    y="pct_hoog_advies",
+                    color="stadsdeel",
+                    hover_name="wijk_naam",
+                    trendline="ols",
+                    trendline_scope="overall",
+                    title="% Niet-westers vs. % hoog schooladvies",
+                    labels={
+                        "pct_niet_westers": "% Niet-westerse achtergrond",
+                        "pct_hoog_advies": "% Hoog advies (HAVO+)",
+                    },
+                    height=400,
+                )
+                st.plotly_chart(fig_nw, width="stretch")
+                ster2 = "***" if p2 < 0.001 else "**" if p2 < 0.01 else "*" if p2 < 0.05 else "niet significant"
+                st.info(f"Correlatie: r = {r2:.3f} | p = {p2:.4f} ({ster2})")
 
     with col2:
-        # bijstelling vs niet-westerse achtergrond
-        na_df = duo_df[duo_df["schooljaar"] == "2023-2024"]
-        bij2 = (
-            na_df.groupby(["wijk_naam"], as_index=False)
-            .agg(totaal=("aantal_leerlingen", "sum"), bijgesteld=("bijgesteld_hoger", "sum"))
-        )
-        bij2["pct_bijgesteld"] = (bij2["bijgesteld"] / bij2["totaal"] * 100).round(1)
-        bij2 = bij2.merge(wijken_df[["wijk_naam", "pct_niet_westers", "stadsdeel"]], on="wijk_naam", how="left")
-        bij2 = bij2.dropna(subset=["pct_niet_westers", "pct_bijgesteld"])
-
-        if len(bij2) >= 3:
-            r3, p3 = stats.pearsonr(bij2["pct_niet_westers"], bij2["pct_bijgesteld"])
-            fig_bij2 = px.scatter(
-                bij2,
-                x="pct_niet_westers",
-                y="pct_bijgesteld",
-                color="stadsdeel",
-                hover_name="wijk_naam",
-                trendline="ols",
-                trendline_scope="overall",
-                title="% Niet-westers vs. % bijgesteld advies (2023-2024)",
-                labels={
-                    "pct_niet_westers": "% Niet-westerse achtergrond",
-                    "pct_bijgesteld": "% Bijgesteld advies hoger",
-                },
-                height=400,
+        if not heeft_nw:
+            st.info("Kolom '% niet-westers' is niet beschikbaar in de huidige CBS-data.")
+        else:
+            # bijstelling vs niet-westerse achtergrond
+            na_df = duo_df[duo_df["schooljaar"] == "2023-2024"]
+            bij2 = (
+                na_df.groupby(["wijk_naam"], as_index=False)
+                .agg(totaal=("aantal_leerlingen", "sum"), bijgesteld=("bijgesteld_hoger", "sum"))
             )
-            st.plotly_chart(fig_bij2, width="stretch")
-            ster3 = "***" if p3 < 0.001 else "**" if p3 < 0.01 else "*" if p3 < 0.05 else "niet significant"
-            st.info(f"Correlatie: r = {r3:.3f} | p = {p3:.4f} ({ster3})")
+            bij2["pct_bijgesteld"] = (bij2["bijgesteld"] / bij2["totaal"] * 100).round(1)
+            bij2 = bij2.merge(wijken_df[["wijk_naam", "pct_niet_westers", "stadsdeel"]], on="wijk_naam", how="left")
+            bij2 = bij2.dropna(subset=["pct_niet_westers", "pct_bijgesteld"])
+
+            if len(bij2) >= 3:
+                r3, p3 = stats.pearsonr(bij2["pct_niet_westers"], bij2["pct_bijgesteld"])
+                fig_bij2 = px.scatter(
+                    bij2,
+                    x="pct_niet_westers",
+                    y="pct_bijgesteld",
+                    color="stadsdeel",
+                    hover_name="wijk_naam",
+                    trendline="ols",
+                    trendline_scope="overall",
+                    title="% Niet-westers vs. % bijgesteld advies (2023-2024)",
+                    labels={
+                        "pct_niet_westers": "% Niet-westerse achtergrond",
+                        "pct_bijgesteld": "% Bijgesteld advies hoger",
+                    },
+                    height=400,
+                )
+                st.plotly_chart(fig_bij2, width="stretch")
+                ster3 = "***" if p3 < 0.001 else "**" if p3 < 0.01 else "*" if p3 < 0.05 else "niet significant"
+                st.info(f"Correlatie: r = {r3:.3f} | p = {p3:.4f} ({ster3})")
 
     st.markdown("---")
     st.subheader("📊 Wijken gegroepeerd: hoog vs. laag niet-westers aandeel")
 
-    if not wijken_gefilterd.empty:
+    if not wijken_gefilterd.empty and heeft_nw:
         mediaan_nw = wijken_df["pct_niet_westers"].median()
         wijken_gefilterd = wijken_gefilterd.copy()
         wijken_gefilterd["nw_groep"] = wijken_gefilterd["pct_niet_westers"].apply(
@@ -636,6 +657,8 @@ with tab5:
             height=400,
         )
         st.plotly_chart(fig_box, width="stretch")
+    elif not heeft_nw:
+        st.info("Kolom '% niet-westers' is niet beschikbaar in de huidige CBS-data.")
 
     st.markdown("""
     **Wat zien we?** Wijken met veel inwoners met een niet-westerse achtergrond hebben
@@ -813,18 +836,22 @@ with tab7:
     st.markdown("---")
     st.subheader("🛠️ Hoe de APIs werken")
 
-    with st.expander("1. CBS OData v4 API — Kerncijfers Wijken en Buurten"):
+    with st.expander("1. CBS OData v3 API — Kerncijfers Wijken en Buurten"):
         st.markdown("""
-        **URL:** `https://odata4.cbs.nl/CBS/85984NED/TypedDataSet`
+        **URL:** `https://opendata.cbs.nl/ODataApi/odata/85984NED/TypedDataSet`
 
-        De CBS OData API gebruikt het OData v4 protocol. Je kunt data filteren met `$filter`,
+        De CBS OData API gebruikt het OData v3 protocol. Je kunt data filteren met `$filter`,
         het aantal rijen beperken met `$top`, en het formaat kiezen met `$format=json`.
+
+        > **Let op:** De nieuwere v4-API (`odata4.cbs.nl`) is momenteel niet bereikbaar.
+        > We gebruiken daarom de stabielere v3-API via `opendata.cbs.nl`.
+        > In v3 heet het regio-veld `WijkenEnBuurten` in plaats van `RegioS`.
 
         **Ons verzoek:**
         ```
-        $filter=startswith(RegioS,'WK0363')   ← alleen Amsterdam-wijken
-        $top=200                               ← maximaal 200 rijen
-        $format=json                           ← JSON formaat
+        $filter=startswith(WijkenEnBuurten,'WK0363')   ← alleen Amsterdam-wijken
+        $top=200                                        ← maximaal 200 rijen
+        $format=json                                    ← JSON formaat
         ```
 
         **Dataset:** 85984NED = Kerncijfers Wijken en Buurten 2024.
