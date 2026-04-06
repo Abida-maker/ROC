@@ -37,6 +37,80 @@ ADVIES_KLEUREN = {
 
 SCHOOLJAREN = ["2018-2019", "2019-2020", "2020-2021", "2021-2022", "2022-2023", "2023-2024"]
 
+# De live DUO-data gebruikt numerieke adviescodes. Voor dit dashboard zetten we die
+# grof om naar dezelfde 8 categorieen als in de rest van de app.
+DUO_ADVIES_NAAR_TYPE = {
+    1:  "Praktijkonderwijs",
+    2:  "VMBO-BBL",
+    3:  "VMBO-BBL",
+    4:  "VMBO-KBL",
+    5:  "VMBO-KBL",
+    6:  "VMBO-TL",
+    7:  "VMBO-TL",
+    8:  "VMBO-TL/HAVO",
+    9:  "HAVO",
+    10: "HAVO",
+    11: "HAVO/VWO",
+    12: "VWO",
+}
+
+
+def koppel_cbs_code_aan_dashboard(wijk_code):
+    code = str(wijk_code).strip()
+
+    if code.startswith("WK0363A"):
+        return "Centrum"
+    if code.startswith("WK0363B"):
+        return "Westelijk Havengebied"
+
+    if code in ["WK0363EA", "WK0363EB", "WK0363EC", "WK0363ED", "WK0363EE"]:
+        return "Westerpark"
+    if code in ["WK0363EF", "WK0363EG", "WK0363EH", "WK0363EJ", "WK0363EK"]:
+        return "Bos en Lommer"
+    if code.startswith("WK0363E"):
+        return "Oud-West / De Baarsjes"
+
+    if code in ["WK0363FA", "WK0363FB", "WK0363FC", "WK0363FD", "WK0363FE"]:
+        return "Geuzenveld-Slotermeer"
+    if code in ["WK0363FF", "WK0363FG", "WK0363FH", "WK0363FJ", "WK0363FK"]:
+        return "Osdorp"
+    if code in ["WK0363FL", "WK0363FM", "WK0363FN"]:
+        return "Slotervaart"
+    if code in ["WK0363FP", "WK0363FQ"]:
+        return "Aker, Sloten en Nieuw Sloten"
+
+    if code in ["WK0363KA", "WK0363KB", "WK0363KC", "WK0363KD"]:
+        return "Oud-Zuid"
+    if code in ["WK0363KE", "WK0363KF", "WK0363KG", "WK0363KH"]:
+        return "De Pijp / Rivierenbuurt"
+    if code in ["WK0363KJ", "WK0363KK", "WK0363KL", "WK0363KM"]:
+        return "Buitenveldert / Zuidas"
+    if code in ["WK0363KN", "WK0363KP", "WK0363KQ", "WK0363KR"]:
+        return "Zuideramstel"
+
+    if code in ["WK0363MA", "WK0363MB", "WK0363MC", "WK0363MD"]:
+        return "Watergraafsmeer"
+    if code in ["WK0363ME", "WK0363MF", "WK0363MG", "WK0363MH"]:
+        return "Indische Buurt"
+    if code in ["WK0363MJ", "WK0363MK", "WK0363ML"]:
+        return "IJburg / Zeeburgereiland"
+    if code in ["WK0363MM", "WK0363MN", "WK0363MP", "WK0363MQ"]:
+        return "De Omval / Overamstel"
+
+    if code in ["WK0363NA", "WK0363NB", "WK0363NC", "WK0363ND", "WK0363NE", "WK0363NF", "WK0363NG"]:
+        return "Noord-West"
+    if code in ["WK0363NH", "WK0363NJ", "WK0363NK", "WK0363NL", "WK0363NM", "WK0363NN", "WK0363NP", "WK0363NQ"]:
+        return "Noord-Oost"
+
+    if code in ["WK0363TA", "WK0363TB", "WK0363TC", "WK0363TD"]:
+        return "Bijlmer-Centrum"
+    if code in ["WK0363TE", "WK0363TF", "WK0363TG", "WK0363TH"]:
+        return "Bijlmer-Oost"
+    if code in ["WK0363TJ", "WK0363TK", "WK0363TL", "WK0363TM"]:
+        return "Gaasperdam / Driemond"
+
+    return None
+
 
 # ---------------------------------------------------------------
 # 1. CBS data ophalen - inkomen, niet-westerse achtergrond etc.
@@ -98,7 +172,45 @@ def haal_cbs_data_op():
             if df.columns.duplicated().any():
                 df = df.loc[:, ~df.columns.duplicated()]
 
-            return df, "Live data van CBS OData API (v3 — opendata.cbs.nl)"
+            df["wijk_code"] = df["wijk_code"].astype(str).str.strip()
+            df["wijk_naam"] = df["wijk_code"].apply(koppel_cbs_code_aan_dashboard)
+            df = df[df["wijk_naam"].notna()].copy()
+
+            nooddata = maak_cbs_nooddata()
+            wijk_info = nooddata[["wijk_code", "wijk_naam", "stadsdeel", "lat", "lon"]]
+
+            numerieke_kolommen = []
+            overslaan = ["ID", "wijk_code", "wijk_naam", "Gemeentenaam_1", "SoortRegio_2", "Codering_3"]
+            for kolom in df.columns:
+                if kolom in overslaan:
+                    continue
+                df[kolom] = pd.to_numeric(df[kolom], errors="coerce")
+                if pd.api.types.is_numeric_dtype(df[kolom]):
+                    numerieke_kolommen.append(kolom)
+
+            aggregaties = {}
+            for kolom in numerieke_kolommen:
+                if kolom == "aantal_inwoners":
+                    aggregaties[kolom] = "sum"
+                else:
+                    aggregaties[kolom] = "mean"
+
+            df = df.groupby("wijk_naam", as_index=False).agg(aggregaties)
+
+            # Een paar live CBS-velden zijn aantallen. Voor dit dashboard maken we daar
+            # eenvoudige percentages van zodat ze beter aansluiten op de rest van de app.
+            if "pct_niet_westers" in df.columns and "aantal_inwoners" in df.columns:
+                df["pct_niet_westers"] = (df["pct_niet_westers"] / df["aantal_inwoners"] * 100).round(1)
+            if "pct_uitkering" in df.columns and "aantal_inwoners" in df.columns:
+                df["pct_uitkering"] = (df["pct_uitkering"] / df["aantal_inwoners"] * 100).round(1)
+            if "pct_hoog_opgeleid" in df.columns and "pct_laag_opgeleid" in df.columns and "HavoVwoMbo24_68" in df.columns:
+                totaal_opleiding = df["pct_laag_opgeleid"] + df["HavoVwoMbo24_68"] + df["pct_hoog_opgeleid"]
+                df["pct_hoog_opgeleid"] = (df["pct_hoog_opgeleid"] / totaal_opleiding * 100).round(1)
+                df["pct_laag_opgeleid"] = (df["pct_laag_opgeleid"] / totaal_opleiding * 100).round(1)
+
+            df = wijk_info.merge(df, on="wijk_naam", how="left")
+
+            return df, "Live data van CBS OData API (samengevoegd naar dashboardwijken)"
 
     except Exception as fout:
         pass  # als de API niet werkt gaan we door naar de nooddata
@@ -150,7 +262,7 @@ def maak_cbs_nooddata():
 # ---------------------------------------------------------------
 
 @st.cache_data(ttl=86400)
-def haal_duo_data_op():
+def haal_duo_data_op(scholen_df):
     # DUO Open Onderwijsdata - dataset wpoadvies-v1
     # API documentatie: https://onderwijsdata.duo.nl/api/3/action/
     url = "https://onderwijsdata.duo.nl/api/3/action/package_show"
@@ -166,19 +278,48 @@ def haal_duo_data_op():
         csv_bestanden = [b for b in bronnen if b.get("format", "").upper() == "CSV"]
         if len(csv_bestanden) > 0:
             nieuwste = sorted(csv_bestanden, key=lambda x: x.get("name", ""), reverse=True)[0]
-            csv_antwoord = requests.get(nieuwste["url"], timeout=100)
-            csv_antwoord.raise_for_status()
+            df = pd.read_csv(
+                nieuwste["url"],
+                sep=",",
+                dtype={"INSTELLINGSCODE": str, "VESTIGINGSCODE": str},
+            )
 
-            from io import StringIO
-            df = pd.read_csv(StringIO(csv_antwoord.text), sep=";", encoding="latin-1")
+            df["brin"] = (
+                df["INSTELLINGSCODE"].fillna("").str.strip().str.upper() +
+                df["VESTIGINGSCODE"].fillna("").str.zfill(2)
+            )
+            df["schooljaar"] = (df["PEILJAAR"] - 1).astype(str) + "-" + df["PEILJAAR"].astype(str)
+            df["advies_type"] = df["ADVIES"].map(DUO_ADVIES_NAAR_TYPE)
+            df["aantal_leerlingen"] = pd.to_numeric(df["AANTAL_LEERLINGEN"], errors="coerce").fillna(0)
 
-            # filter op Amsterdam
-            for kol in ["PLAATSNAAM", "Plaatsnaam"]:
-                if kol in df.columns:
-                    df = df[df[kol].str.upper() == "AMSTERDAM"]
-                    break
+            df = df[
+                df["schooljaar"].isin(SCHOOLJAREN) &
+                df["advies_type"].notna() &
+                (df["aantal_leerlingen"] >= 0)
+            ].copy()
 
-            return df, "Live data van DUO Open Onderwijsdata"
+            # Koppel live DUO aan de Amsterdam schooldata via BRIN.
+            df = df.merge(
+                scholen_df[["brin", "school_naam", "stadsdeel", "wijk_naam"]],
+                on="brin",
+                how="inner"
+            )
+
+            # Gebruik de bekende Amsterdam wijkcodes uit onze vaste wijktabel.
+            wijk_info = maak_cbs_nooddata()[["wijk_code", "wijk_naam", "stadsdeel"]]
+            df = df.merge(wijk_info, on=["wijk_naam", "stadsdeel"], how="left")
+
+            if len(df) > 0 and "wijk_code" in df.columns:
+                df = (
+                    df.groupby(
+                        ["brin", "school_naam", "wijk_code", "wijk_naam", "stadsdeel", "schooljaar", "advies_type"],
+                        as_index=False
+                    )["aantal_leerlingen"]
+                    .sum()
+                )
+                # In deze live DUO-bron zit geen apart veld voor bijgestelde adviezen.
+                df["bijgesteld_hoger"] = 0
+                return df, "Live data van DUO Open Onderwijsdata (adviescodes samengevoegd, bijstelling niet apart beschikbaar)"
 
     except Exception as fout:
         pass
@@ -269,14 +410,202 @@ def maak_duo_nooddata():
 
 
 # ---------------------------------------------------------------
-# 3. Gecombineerde dataset maken
+# 3. Amsterdam schooldata ophalen
+# ---------------------------------------------------------------
+
+@st.cache_data(ttl=86400)
+def haal_amsterdam_scholen_op():
+    # Eenvoudige live koppeling met de open schoolgebouwen-API van Amsterdam.
+    # We halen instellingen en accommodaties op en koppelen die via instellingId.
+    instellingen_url = "https://api.data.amsterdam.nl/v1/schoolgebouwen/instelling/"
+    accommodaties_url = "https://api.data.amsterdam.nl/v1/schoolgebouwen/accommodatie/"
+
+    try:
+        instellingen_resp = requests.get(instellingen_url, params={"_pageSize": 2000}, timeout=30)
+        accommodaties_resp = requests.get(accommodaties_url, params={"_pageSize": 2000}, timeout=30)
+        instellingen_resp.raise_for_status()
+        accommodaties_resp.raise_for_status()
+
+        instellingen_records = instellingen_resp.json().get("_embedded", {}).get("instelling", [])
+        accommodaties_records = accommodaties_resp.json().get("_embedded", {}).get("accommodatie", [])
+
+        if len(instellingen_records) == 0 or len(accommodaties_records) == 0:
+            raise ValueError("Amsterdam API gaf geen schoolrecords terug")
+
+        instellingen_df = pd.DataFrame(instellingen_records)
+        accommodaties_df = pd.DataFrame(accommodaties_records)
+
+        scholen_df = instellingen_df.merge(
+            accommodaties_df[["instellingId", "stadsdeel", "wijk", "adresStraat", "archief", "mIsActief"]].rename(columns={
+                "archief": "archief_accommodatie",
+                "mIsActief": "actief_accommodatie"
+            }),
+            on="instellingId",
+            how="left"
+        )
+
+        scholen_df = scholen_df[
+            scholen_df["brinNummerDuo"].notna() &
+            scholen_df["naam"].notna() &
+            scholen_df["stadsdeel"].notna()
+        ].copy()
+
+        scholen_df = scholen_df[
+            scholen_df["mIsActief"].eq(True) &
+            scholen_df["actief_accommodatie"].eq(True) &
+            (scholen_df["archief"].fillna("Nee") != "Ja") &
+            (scholen_df["archief_accommodatie"].fillna("Nee") != "Ja")
+        ].copy()
+
+        # Voor deze app willen we alleen basisscholen / speciaal basisonderwijs tonen.
+        scholen_df = scholen_df[
+            scholen_df["soort"].fillna("").str.contains("BO|SBO", case=False, regex=True)
+        ].copy()
+
+        scholen_df["brin"] = (
+            scholen_df["brinNummerDuo"]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+        scholen_df = scholen_df.rename(columns={
+            "naam": "school_naam",
+            "wijk": "wijk_naam"
+        })
+        scholen_df["wijk_naam"] = scholen_df.apply(
+            lambda rij: koppel_wijk_naam_aan_dashboard(rij["wijk_naam"], rij["stadsdeel"]),
+            axis=1
+        )
+
+        scholen_df = scholen_df[["brin", "school_naam", "stadsdeel", "wijk_naam", "adresStraat"]]
+        scholen_df = scholen_df.drop_duplicates(subset=["brin"]).reset_index(drop=True)
+
+        return scholen_df, "Live data van Amsterdam schoolgebouwen API"
+
+    except Exception:
+        return maak_amsterdam_scholen_nooddata(), "Eigen data (Amsterdam API niet bereikbaar)"
+
+
+def maak_amsterdam_scholen_nooddata():
+    # Als de gemeente-API niet werkt, gebruiken we de scholen uit de nooddata.
+    scholen_df = maak_duo_nooddata().drop_duplicates(subset=["brin"]).copy()
+    scholen_df = scholen_df[["brin", "school_naam", "stadsdeel", "wijk_naam", "lat", "lon"]]
+    return scholen_df.reset_index(drop=True)
+
+
+def koppel_wijk_naam_aan_dashboard(wijk_naam, stadsdeel):
+    # De gemeente gebruikt veel kleinere buurtnamen dan ons dashboard.
+    # Daarom koppelen we die hier simpel aan onze grotere wijkgroepen.
+    wijk = str(wijk_naam).lower()
+    stadsdeel = str(stadsdeel)
+
+    if stadsdeel == "Centrum":
+        return "Centrum"
+
+    if stadsdeel == "West":
+        if "bos en lommer" in wijk:
+            return "Bos en Lommer"
+        if "westerpark" in wijk or "staatslieden" in wijk or "spaarndammer" in wijk:
+            return "Westerpark"
+        if "haven" in wijk or "sloterdijk" in wijk:
+            return "Westelijk Havengebied"
+        return "Oud-West / De Baarsjes"
+
+    if stadsdeel == "Nieuw-West":
+        if "geuzenveld" in wijk or "slotermeer" in wijk:
+            return "Geuzenveld-Slotermeer"
+        if "osdorp" in wijk:
+            return "Osdorp"
+        if "aker" in wijk or "sloten" in wijk:
+            return "Aker, Sloten en Nieuw Sloten"
+        return "Slotervaart"
+
+    if stadsdeel == "Zuid":
+        if "buitenveldert" in wijk or "zuidas" in wijk:
+            return "Buitenveldert / Zuidas"
+        if "pijp" in wijk or "rivierenbuurt" in wijk:
+            return "De Pijp / Rivierenbuurt"
+        if "amstel" in wijk or "rai" in wijk:
+            return "Zuideramstel"
+        return "Oud-Zuid"
+
+    if stadsdeel == "Oost":
+        if "ijburg" in wijk or "zeeburgereiland" in wijk:
+            return "IJburg / Zeeburgereiland"
+        if "indische" in wijk:
+            return "Indische Buurt"
+        if "omval" in wijk or "overamstel" in wijk or "havengebied" in wijk:
+            return "De Omval / Overamstel"
+        return "Watergraafsmeer"
+
+    if stadsdeel == "Noord":
+        if "nieuwendam" in wijk or "banne" in wijk or "buikslotermeer" in wijk:
+            return "Noord-Oost"
+        return "Noord-West"
+
+    if stadsdeel == "Zuidoost":
+        if "gaasperdam" in wijk or "driemond" in wijk or "gein" in wijk or "reigersbos" in wijk:
+            return "Gaasperdam / Driemond"
+        if "bijlmer-oost" in wijk or "nellestein" in wijk:
+            return "Bijlmer-Oost"
+        return "Bijlmer-Centrum"
+
+    return wijk_naam
+
+
+def voeg_schoollocaties_toe(scholen_df, wijken_df):
+    scholen_df = scholen_df.copy()
+
+    if "lat" in scholen_df.columns and "lon" in scholen_df.columns:
+        return scholen_df
+
+    wijk_centra = wijken_df[["wijk_naam", "stadsdeel", "lat", "lon"]].rename(columns={
+        "lat": "wijk_lat",
+        "lon": "wijk_lon"
+    })
+    stadsdeel_centra = (
+        wijken_df.groupby("stadsdeel", as_index=False)[["lat", "lon"]]
+        .mean()
+        .rename(columns={"lat": "stadsdeel_lat", "lon": "stadsdeel_lon"})
+    )
+
+    scholen_df = scholen_df.merge(wijk_centra, on=["wijk_naam", "stadsdeel"], how="left")
+    scholen_df = scholen_df.merge(stadsdeel_centra, on="stadsdeel", how="left")
+
+    scholen_df["basis_lat"] = scholen_df["wijk_lat"].fillna(scholen_df["stadsdeel_lat"])
+    scholen_df["basis_lon"] = scholen_df["wijk_lon"].fillna(scholen_df["stadsdeel_lon"])
+
+    # De schoolgebouwen-endpoint geeft hier geen bruikbare coordinaten terug.
+    # Daarom zetten we scholen simpel in de buurt van hun wijk/stadsdeel.
+    lat_offsets = []
+    lon_offsets = []
+    for brin in scholen_df["brin"].fillna(""):
+        code = str(brin)
+        nummer = sum((i + 1) * ord(letter) for i, letter in enumerate(code))
+        lat_offsets.append(((nummer % 17) - 8) * 0.0012)
+        lon_offsets.append((((nummer // 17) % 17) - 8) * 0.0015)
+
+    scholen_df["lat"] = scholen_df["basis_lat"] + pd.Series(lat_offsets, index=scholen_df.index)
+    scholen_df["lon"] = scholen_df["basis_lon"] + pd.Series(lon_offsets, index=scholen_df.index)
+
+    scholen_df = scholen_df.drop(columns=[
+        "wijk_lat", "wijk_lon", "stadsdeel_lat", "stadsdeel_lon", "basis_lat", "basis_lon"
+    ])
+
+    scholen_df = scholen_df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+    return scholen_df
+
+
+# ---------------------------------------------------------------
+# 4. Gecombineerde dataset maken
 # ---------------------------------------------------------------
 
 @st.cache_data(ttl=86400)
 def laad_alle_data():
     # data ophalen van de drie bronnen
     cbs_df, cbs_bron = haal_cbs_data_op()
-    duo_df, duo_bron = haal_duo_data_op()
+    scholen_df, amsterdam_bron = haal_amsterdam_scholen_op()
+    duo_df, duo_bron = haal_duo_data_op(scholen_df)
 
     # als de live DUO data een andere kolomstructuur heeft, gebruik dan onze eigen data
     # de eigen data heeft altijd wijk_code zodat we kunnen koppelen
@@ -337,9 +666,12 @@ def laad_alle_data():
     wijken_df["pct_hoog_advies"] = wijken_df[hoog].sum(axis=1).round(1)
     wijken_df["pct_laag_advies"] = wijken_df[laag].sum(axis=1).round(1)
 
+    scholen_df = voeg_schoollocaties_toe(scholen_df, wijken_df)
+
     bronnen = {
         "CBS Kerncijfers Wijken en Buurten 2024": cbs_bron,
         "DUO Schooladviezen per school":          duo_bron,
+        "Amsterdam schoolgebouwen":              amsterdam_bron,
     }
 
-    return wijken_df, duo_df, bronnen
+    return wijken_df, duo_df, scholen_df, bronnen

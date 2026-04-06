@@ -4,7 +4,7 @@
 #
 # We onderzoeken of de doorstroomtoets (ingevoerd in 2023-2024) helpt
 # om de kansenongelijkheid in Amsterdam te verkleinen.
-# Daarnaast kijken we naar het effect van asielzoekers/nieuwkomers op schooladviezen.
+# Daarnaast kijken we naar kansengelijkheid in schooladviezen tussen Amsterdamse wijken.
 
 import streamlit as st
 import pandas as pd
@@ -45,8 +45,8 @@ st.markdown("""
 # ---------------------------------------------------------------
 # Data laden
 # ---------------------------------------------------------------
-with st.spinner("Data ophalen van CBS en DUO..."):
-    wijken_df, duo_df, bronnen = laad_alle_data()
+with st.spinner("Data ophalen van CBS, DUO en gemeente Amsterdam..."):
+    wijken_df, duo_df, scholen_df, bronnen = laad_alle_data()
 
 # ---------------------------------------------------------------
 # SIDEBAR - alle filters staan hier
@@ -174,15 +174,22 @@ if gekozen_wijk not in ["Alle wijken", "—"]:
     wijken_gefilterd = wijken_gefilterd[wijken_gefilterd["wijk_naam"] == gekozen_wijk]
     duo_gefilterd    = duo_gefilterd[duo_gefilterd["wijk_naam"] == gekozen_wijk]
 
+if gekozen_stadsdeel != "Alle stadsdelen":
+    scholen_gefilterd = scholen_df[scholen_df["stadsdeel"] == gekozen_stadsdeel].copy()
+else:
+    scholen_gefilterd = scholen_df.copy()
+
+if gekozen_wijk != "Alle wijken" and "wijk_naam" in scholen_gefilterd.columns:
+    scholen_gefilterd = scholen_gefilterd[scholen_gefilterd["wijk_naam"] == gekozen_wijk]
+
 # ---------------------------------------------------------------
 # TABS - de verschillende secties van het dashboard
 # ---------------------------------------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🏠 Introductie",
     "🗺️ Kaart Amsterdam",
     "📊 Schooladviezen",
     "🎓 Doorstroomtoets",
-    "🌍 Asielzoekers",
     "🔮 Voorspelling",
     "📚 Data & Methoden",
 ])
@@ -211,8 +218,7 @@ with tab1:
 
     ### Onze onderzoeksvraag
 
-    > **Helpt de doorstroomtoets kinderen in achterstandswijken van Amsterdam?
-    > En wat is het effect van asielzoekers en nieuwkomers op de schooladviezen?**
+    > **Helpt de doorstroomtoets kinderen in achterstandswijken van Amsterdam?**
 
     ### Wat je in dit dashboard vindt
 
@@ -221,7 +227,6 @@ with tab1:
     | 🗺️ Kaart | Overzicht van Amsterdam met schooladviezen per wijk |
     | 📊 Schooladviezen | Alle adviestypen (PrO t/m VWO) per wijk vergeleken |
     | 🎓 Doorstroomtoets | Voor en na vergelijking: is er iets veranderd? |
-    | 🌍 Asielzoekers | Samenhang tussen nieuwkomers en schooladviezen |
     | 🔮 Voorspelling | Welke wijk doet het beter/slechter dan verwacht? |
 
     ---
@@ -309,10 +314,9 @@ with tab2:
     st.subheader("📍 Schoollocaties")
     st.markdown("Hieronder zie je alle basisscholen op de kaart, gekleurd per stadsdeel.")
 
-    scholen_df = duo_gefilterd[duo_gefilterd["schooljaar"] == gekozen_jaren[-1]].drop_duplicates("brin")
-    if not scholen_df.empty and "lat" in scholen_df.columns:
+    if not scholen_gefilterd.empty and "lat" in scholen_gefilterd.columns:
         fig_scholen = px.scatter_map(
-            scholen_df,
+            scholen_gefilterd,
             lat="lat",
             lon="lon",
             color="stadsdeel",
@@ -321,12 +325,13 @@ with tab2:
             map_style="carto-positron",
             zoom=10.5,
             center={"lat": 52.365, "lon": 4.900},
-            title=f"Basisscholen in Amsterdam ({gekozen_jaren[-1]})",
+            title="Basisscholen in Amsterdam (gemeentedata)",
             height=450,
         )
         fig_scholen.update_traces(marker=dict(size=8))
         fig_scholen.update_layout(margin={"r": 0, "t": 40, "l": 0, "b": 0})
         st.plotly_chart(fig_scholen, width="stretch")
+        st.caption("Schoolnamen, wijk en stadsdeel komen live uit de Amsterdam API. De kaartpositie is benaderd vanuit wijk- of stadsdeelcentra.")
 
 
 # ===============================================================
@@ -548,133 +553,9 @@ with tab4:
 
 
 # ===============================================================
-# TAB 5 - ASIELZOEKERS & NIEUWKOMERS
+# TAB 5 - VOORSPELLEND MODEL
 # ===============================================================
 with tab5:
-    st.header("🌍 Asielzoekers & Nieuwkomers in het onderwijs")
-    st.markdown("""
-    Amsterdam heeft veel wijken met een hoog aandeel inwoners met een **niet-westerse
-    migratieachtergrond**. Een deel hiervan zijn (voormalige) asielzoekers en statushouders.
-
-    We gebruiken het **% niet-westerse achtergrond per wijk** (CBS 2024) als proxy,
-    omdat er geen openbare data is over exacte aantallen asielzoekers per wijk.
-
-    **Vraag:** Krijgen kinderen in wijken met veel nieuwkomers een lager schooladvies?
-    En helpt de doorstroomtoets hen meer dan kinderen in andere wijken?
-    """)
-
-    st.markdown("---")
-
-    # controleer of pct_niet_westers beschikbaar is voor deze tab
-    heeft_nw = "pct_niet_westers" in wijken_df.columns and wijken_df["pct_niet_westers"].notna().any()
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if not heeft_nw:
-            st.info("Kolom '% niet-westers' is niet beschikbaar in de huidige CBS-data.")
-        else:
-            scatter2_df = wijken_gefilterd.dropna(subset=["pct_niet_westers", "pct_hoog_advies"])
-            if len(scatter2_df) >= 3:
-                r2, p2 = stats.pearsonr(scatter2_df["pct_niet_westers"], scatter2_df["pct_hoog_advies"])
-                fig_nw = px.scatter(
-                    scatter2_df,
-                    x="pct_niet_westers",
-                    y="pct_hoog_advies",
-                    color="stadsdeel",
-                    hover_name="wijk_naam",
-                    trendline="ols",
-                    trendline_scope="overall",
-                    title="% Niet-westers vs. % hoog schooladvies",
-                    labels={
-                        "pct_niet_westers": "% Niet-westerse achtergrond",
-                        "pct_hoog_advies": "% Hoog advies (HAVO+)",
-                    },
-                    height=400,
-                )
-                st.plotly_chart(fig_nw, width="stretch")
-                ster2 = "***" if p2 < 0.001 else "**" if p2 < 0.01 else "*" if p2 < 0.05 else "niet significant"
-                st.info(f"Correlatie: r = {r2:.3f} | p = {p2:.4f} ({ster2})")
-
-    with col2:
-        if not heeft_nw:
-            st.info("Kolom '% niet-westers' is niet beschikbaar in de huidige CBS-data.")
-        else:
-            # bijstelling vs niet-westerse achtergrond
-            na_df = duo_df[duo_df["schooljaar"] == "2023-2024"]
-            bij2 = (
-                na_df.groupby(["wijk_naam"], as_index=False)
-                .agg(totaal=("aantal_leerlingen", "sum"), bijgesteld=("bijgesteld_hoger", "sum"))
-            )
-            bij2["pct_bijgesteld"] = (bij2["bijgesteld"] / bij2["totaal"] * 100).round(1)
-            bij2 = bij2.merge(wijken_df[["wijk_naam", "pct_niet_westers", "stadsdeel"]], on="wijk_naam", how="left")
-            bij2 = bij2.dropna(subset=["pct_niet_westers", "pct_bijgesteld"])
-
-            if len(bij2) >= 3:
-                r3, p3 = stats.pearsonr(bij2["pct_niet_westers"], bij2["pct_bijgesteld"])
-                fig_bij2 = px.scatter(
-                    bij2,
-                    x="pct_niet_westers",
-                    y="pct_bijgesteld",
-                    color="stadsdeel",
-                    hover_name="wijk_naam",
-                    trendline="ols",
-                    trendline_scope="overall",
-                    title="% Niet-westers vs. % bijgesteld advies (2023-2024)",
-                    labels={
-                        "pct_niet_westers": "% Niet-westerse achtergrond",
-                        "pct_bijgesteld": "% Bijgesteld advies hoger",
-                    },
-                    height=400,
-                )
-                st.plotly_chart(fig_bij2, width="stretch")
-                ster3 = "***" if p3 < 0.001 else "**" if p3 < 0.01 else "*" if p3 < 0.05 else "niet significant"
-                st.info(f"Correlatie: r = {r3:.3f} | p = {p3:.4f} ({ster3})")
-
-    st.markdown("---")
-    st.subheader("📊 Wijken gegroepeerd: hoog vs. laag niet-westers aandeel")
-
-    if not wijken_gefilterd.empty and heeft_nw:
-        mediaan_nw = wijken_df["pct_niet_westers"].median()
-        wijken_gefilterd = wijken_gefilterd.copy()
-        wijken_gefilterd["nw_groep"] = wijken_gefilterd["pct_niet_westers"].apply(
-            lambda x: f"Hoog (>{mediaan_nw:.0f}%)" if x > mediaan_nw else f"Laag (≤{mediaan_nw:.0f}%)"
-            if pd.notna(x) else "Onbekend"
-        )
-
-        fig_box = px.box(
-            wijken_gefilterd.dropna(subset=["pct_hoog_advies"]),
-            x="nw_groep",
-            y="pct_hoog_advies",
-            color="nw_groep",
-            color_discrete_map={
-                f"Hoog (>{mediaan_nw:.0f}%)": "#d73027",
-                f"Laag (≤{mediaan_nw:.0f}%)": "#1a9850",
-            },
-            title="Hoog advies % in wijken met hoog vs. laag niet-westers aandeel",
-            labels={"nw_groep": "Groep", "pct_hoog_advies": "% Hoog advies"},
-            points="all",
-            height=400,
-        )
-        st.plotly_chart(fig_box, width="stretch")
-    elif not heeft_nw:
-        st.info("Kolom '% niet-westers' is niet beschikbaar in de huidige CBS-data.")
-
-    st.markdown("""
-    **Wat zien we?** Wijken met veel inwoners met een niet-westerse achtergrond hebben
-    gemiddeld een **lager percentage hoge schooladviezen**. Dit suggereert dat de
-    sociaaleconomische achterstand en taalbarrières die asielzoekers en nieuwkomers
-    meebrengen, effect hebben op schoolprestaties.
-
-    De doorstroomtoets kan helpen, maar is geen oplossing voor bredere achterstanden.
-    Extra taalondersteuning en nieuwkomersklassen zijn ook belangrijk.
-    """)
-
-
-# ===============================================================
-# TAB 6 - VOORSPELLEND MODEL
-# ===============================================================
-with tab6:
     st.header("🔮 Voorspellend model: welke wijk doet het beter dan verwacht?")
     st.markdown("""
     We bouwen een **lineair regressiemodel** dat probeert te voorspellen hoeveel
@@ -820,7 +701,7 @@ with tab6:
 # ===============================================================
 # TAB 7 - DATA & METHODEN
 # ===============================================================
-with tab7:
+with tab6:
     st.header("📚 Data & Methoden")
     st.markdown("""
     In dit dashboard gebruiken we drie publieke databronnen. Hieronder leggen we uit
@@ -874,13 +755,19 @@ with tab7:
 
     with st.expander("3. Amsterdam Data API — Schoolwijzer & Gebieden"):
         st.markdown("""
-        **URL:** `https://api.data.amsterdam.nl/v1/schoolwijzer/scholen/`
+        **URL's:** `https://api.data.amsterdam.nl/v1/schoolgebouwen/instelling/`
+        en `https://api.data.amsterdam.nl/v1/schoolgebouwen/accommodatie/`
 
         De Amsterdam Data API v1 biedt open data van de gemeente Amsterdam.
-        We gebruiken de Schoolwijzer-data voor schoollocaties (lat/lon, stadsdeel).
+        We gebruiken de schoolgebouwen-data voor schoolnamen, BRIN, wijk en stadsdeel.
 
-        **GeoJSON wijkgrenzen:**
-        `https://api.data.amsterdam.nl/v1/gebieden/wijken/?_format=geojson`
+        **Voorbeeld verzoeken:**
+        `https://api.data.amsterdam.nl/v1/schoolgebouwen/instelling/?_pageSize=2000`
+        `https://api.data.amsterdam.nl/v1/schoolgebouwen/accommodatie/?_pageSize=2000`
+
+        De gebruikte schoolgebouwen-endpoint geeft in deze app geen bruikbare coordinaten
+        terug. Daarom plaatsen we scholen op de kaart in de buurt van hun wijk- of
+        stadsdeelcentrum.
         """)
 
     st.markdown("---")
