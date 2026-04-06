@@ -493,6 +493,66 @@ def maak_amsterdam_scholen_nooddata():
     return scholen_df.reset_index(drop=True)
 
 
+@st.cache_data(ttl=86400)
+def haal_amsterdam_wijkgrenzen_op():
+    # Haal officiele wijkgrenzen op en koppel die aan de grotere wijkgroepen van het dashboard.
+    metadata_url = "https://api.data.amsterdam.nl/v1/gebieden/wijken/"
+    geojson_url = "https://api.data.amsterdam.nl/v1/gebieden/wijken/"
+
+    try:
+        metadata_resp = requests.get(metadata_url, params={"_pageSize": 500}, timeout=30)
+        geojson_resp = requests.get(geojson_url, params={"_format": "geojson", "_pageSize": 500}, timeout=30)
+        metadata_resp.raise_for_status()
+        geojson_resp.raise_for_status()
+
+        metadata_records = metadata_resp.json().get("_embedded", {}).get("wijken", [])
+        geojson = geojson_resp.json()
+
+        stadsdeel_per_cbs = {}
+        for record in metadata_records:
+            cbs_code = record.get("cbsCode")
+            stadsdeel = record.get("_links", {}).get("ligtInStadsdeel", {}).get("title")
+            if cbs_code and stadsdeel:
+                stadsdeel_per_cbs[cbs_code] = stadsdeel
+
+        features = []
+        rijen = []
+        for feature in geojson.get("features", []):
+            properties = feature.get("properties", {})
+            cbs_code = properties.get("cbsCode")
+            officiele_wijk_naam = properties.get("naam")
+            stadsdeel = stadsdeel_per_cbs.get(cbs_code)
+            wijk_naam = koppel_wijk_naam_aan_dashboard(officiele_wijk_naam, stadsdeel)
+
+            if not wijk_naam:
+                continue
+
+            feature_id = feature.get("id")
+            properties["feature_id"] = feature_id
+            properties["dashboard_wijk_naam"] = wijk_naam
+            properties["stadsdeel"] = stadsdeel
+
+            features.append(feature)
+            rijen.append({
+                "feature_id": feature_id,
+                "cbs_code": cbs_code,
+                "officiele_wijk_naam": officiele_wijk_naam,
+                "wijk_naam": wijk_naam,
+                "stadsdeel": stadsdeel,
+            })
+
+        wijk_geojson = {
+            "type": "FeatureCollection",
+            "features": features,
+        }
+        wijkgrenzen_df = pd.DataFrame(rijen)
+
+        return wijk_geojson, wijkgrenzen_df, "Live data van Amsterdam wijkgrenzen API"
+
+    except Exception:
+        return None, pd.DataFrame(), "Amsterdam wijkgrenzen API niet bereikbaar"
+
+
 def koppel_wijk_naam_aan_dashboard(wijk_naam, stadsdeel):
     # De gemeente gebruikt veel kleinere buurtnamen dan ons dashboard.
     # Daarom koppelen we die hier simpel aan onze grotere wijkgroepen.
@@ -649,10 +709,25 @@ def laad_alle_data():
     ).round(1)
 
     # wijk-samenvatting voor het laatste jaar (2023-2024)
+    # We gebruiken totale aantallen per wijk, niet het gemiddelde van schoolpercentages.
     laatste_jaar = duo_df[duo_df["schooljaar"] == "2023-2024"]
     wijk_advies = (
         laatste_jaar
-        .pivot_table(index="wijk_code", columns="advies_type", values="pct", aggfunc="mean")
+        .groupby(["wijk_code", "advies_type"], as_index=False)
+        .agg(aantal_leerlingen=("aantal_leerlingen", "sum"))
+    )
+    wijk_totaal = (
+        wijk_advies
+        .groupby("wijk_code", as_index=False)
+        .agg(totaal=("aantal_leerlingen", "sum"))
+    )
+    wijk_advies = wijk_advies.merge(wijk_totaal, on="wijk_code", how="left")
+    wijk_advies["pct_wijk"] = (
+        wijk_advies["aantal_leerlingen"] / wijk_advies["totaal"] * 100
+    ).round(1)
+    wijk_advies = (
+        wijk_advies
+        .pivot(index="wijk_code", columns="advies_type", values="pct_wijk")
         .reset_index()
     )
     wijk_advies.columns.name = None
@@ -663,8 +738,8 @@ def laad_alle_data():
     # nieuwe variabele: % hoog advies = HAVO + HAVO/VWO + VWO
     hoog = [k for k in ["HAVO", "HAVO/VWO", "VWO"] if k in wijken_df.columns]
     laag = [k for k in ["Praktijkonderwijs", "VMBO-BBL", "VMBO-KBL"] if k in wijken_df.columns]
-    wijken_df["pct_hoog_advies"] = wijken_df[hoog].sum(axis=1).round(1)
-    wijken_df["pct_laag_advies"] = wijken_df[laag].sum(axis=1).round(1)
+    wijken_df["pct_hoog_advies"] = wijken_df[hoog].sum(axis=1, min_count=1).round(1)
+    wijken_df["pct_laag_advies"] = wijken_df[laag].sum(axis=1, min_count=1).round(1)
 
     scholen_df = voeg_schoollocaties_toe(scholen_df, wijken_df)
 

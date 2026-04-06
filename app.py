@@ -15,7 +15,7 @@ from scipy import stats
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 
-from data import laad_alle_data, ADVIES_TYPEN, ADVIES_KLEUREN, SCHOOLJAREN
+from data import laad_alle_data, haal_amsterdam_wijkgrenzen_op, maak_duo_nooddata, ADVIES_TYPEN, ADVIES_KLEUREN, SCHOOLJAREN
 
 # ---------------------------------------------------------------
 # Pagina instellingen
@@ -47,6 +47,7 @@ st.markdown("""
 # ---------------------------------------------------------------
 with st.spinner("Data ophalen van CBS, DUO en gemeente Amsterdam..."):
     wijken_df, duo_df, scholen_df, bronnen = laad_alle_data()
+    wijk_geojson, wijkgrenzen_df, wijkgrenzen_bron = haal_amsterdam_wijkgrenzen_op()
 
 # ---------------------------------------------------------------
 # SIDEBAR - alle filters staan hier
@@ -272,41 +273,90 @@ with tab2:
     st.header("🗺️ Amsterdam in kaart")
     st.markdown("De kleur laat zien hoeveel procent van de kinderen een **hoog advies** (HAVO, HAVO/VWO of VWO) krijgt per wijk.")
 
-    if "pct_hoog_advies" in wijken_gefilterd.columns and "lat" in wijken_gefilterd.columns:
-        kaart_df = wijken_gefilterd.dropna(subset=["lat", "lon", "pct_hoog_advies"])
+    if (
+        "pct_hoog_advies" in wijken_gefilterd.columns and
+        wijk_geojson is not None and
+        not wijkgrenzen_df.empty
+    ):
+        kaart_basis = wijken_gefilterd.dropna(subset=["pct_hoog_advies"]).copy()
 
-        # hover_data alleen opnemen als de kolom ook echt bestaat
-        kaart_hover = {
-            "stadsdeel": True,
-            "pct_hoog_advies": ":.1f",
-            "pct_laag_advies": ":.1f",
-            "gem_inkomen": True,
-            "lat": False,
-            "lon": False,
-        }
-        if "pct_niet_westers" in kaart_df.columns:
-            kaart_hover["pct_niet_westers"] = True
+        advies_aantallen = (
+            duo_gefilterd
+            .groupby(["wijk_naam", "advies_type"], as_index=False)
+            .agg(aantal=("aantal_leerlingen", "sum"))
+        )
+        advies_aantallen = (
+            advies_aantallen
+            .pivot(index="wijk_naam", columns="advies_type", values="aantal")
+            .fillna(0)
+            .reset_index()
+        )
+        advies_aantallen.columns.name = None
 
-        fig_kaart = px.scatter_map(
-            kaart_df,
-            lat="lat",
-            lon="lon",
+        advies_kolommen = []
+        hernoem_adviezen = {}
+        for advies in ADVIES_TYPEN:
+            veilige_kolom = (
+                "aantal_" + advies.lower()
+                .replace("/", "_")
+                .replace("-", "_")
+                .replace(" ", "_")
+            )
+            if advies in advies_aantallen.columns:
+                hernoem_adviezen[advies] = veilige_kolom
+                advies_kolommen.append((advies, veilige_kolom))
+
+        advies_aantallen = advies_aantallen.rename(columns=hernoem_adviezen)
+        kaart_basis = kaart_basis.merge(advies_aantallen, on="wijk_naam", how="left")
+
+        for _, kolom in advies_kolommen:
+            kaart_basis[kolom] = kaart_basis[kolom].fillna(0)
+
+        kaart_polygons = wijkgrenzen_df.merge(
+            kaart_basis,
+            on=["wijk_naam", "stadsdeel"],
+            how="inner"
+        )
+
+        custom_data = ["stadsdeel", "gem_inkomen", "pct_hoog_advies", "pct_laag_advies"]
+        for _, kolom in advies_kolommen:
+            custom_data.append(kolom)
+
+        fig_kaart = px.choropleth_mapbox(
+            kaart_polygons,
+            geojson=wijk_geojson,
+            locations="feature_id",
+            featureidkey="properties.feature_id",
             color="pct_hoog_advies",
-            size="pct_hoog_advies",
-            size_max=35,
-            hover_name="wijk_naam",
-            hover_data=kaart_hover,
             color_continuous_scale="RdYlGn",
             range_color=[0, 70],
-            map_style="carto-positron",
+            mapbox_style="carto-positron",
             zoom=10.5,
             center={"lat": 52.365, "lon": 4.900},
-            title="% leerlingen met hoog schooladvies (HAVO/VWO) per wijk",
+            opacity=0.55,
+            hover_name="wijk_naam",
+            custom_data=custom_data,
+            title="% leerlingen met hoog schooladvies per wijk",
             labels={"pct_hoog_advies": "% Hoog advies"},
-            height=550,
+            height=600,
         )
+        fig_kaart.update_traces(marker_line_width=2, marker_line_color="#1f2937")
+
+        hoverregels = [
+            "<b>%{hovertext}</b>",
+            "Stadsdeel: %{customdata[0]}",
+            "Gem. inkomen: %{customdata[1]:.1f}",
+            "% hoog advies: %{customdata[2]:.1f}%",
+            "% laag advies: %{customdata[3]:.1f}%",
+            "<br><b>Aantallen per adviestype</b>",
+        ]
+        for index, (advies, _) in enumerate(advies_kolommen, start=4):
+            hoverregels.append(f"{advies}: %{{customdata[{index}]:.0f}}")
+        fig_kaart.update_traces(hovertemplate="<br>".join(hoverregels) + "<extra></extra>")
+
         fig_kaart.update_layout(margin={"r": 0, "t": 40, "l": 0, "b": 0})
         st.plotly_chart(fig_kaart, width="stretch")
+        st.caption(f"Wijkgrenzen uit: {wijkgrenzen_bron}. Hover toont aantallen adviezen in de gekozen periode.")
     else:
         st.info("Kaart niet beschikbaar voor de huidige selectie.")
 
@@ -344,11 +394,46 @@ with tab3:
     if duo_gefilterd.empty:
         st.warning("Geen data beschikbaar voor deze selectie.")
     else:
-        # gemiddeld per wijk en adviestype over de gekozen jaren
-        overzicht = (
+        # Eerst aantallen optellen per wijk x jaar x adviestype.
+        # Daarna pas percentages berekenen, zodat een wijk logisch rond 100% uitkomt.
+        wijk_jaar_advies = (
             duo_gefilterd
+            .groupby(["wijk_naam", "stadsdeel", "schooljaar", "advies_type"], as_index=False)
+            .agg(aantal_leerlingen=("aantal_leerlingen", "sum"))
+        )
+        wijk_jaar_totaal = (
+            wijk_jaar_advies
+            .groupby(["wijk_naam", "stadsdeel", "schooljaar"], as_index=False)
+            .agg(totaal=("aantal_leerlingen", "sum"))
+        )
+        wijk_jaar_advies = wijk_jaar_advies.merge(
+            wijk_jaar_totaal,
+            on=["wijk_naam", "stadsdeel", "schooljaar"],
+            how="left"
+        )
+        wijk_jaar_advies["pct_wijk"] = (
+            wijk_jaar_advies["aantal_leerlingen"] / wijk_jaar_advies["totaal"] * 100
+        ).round(1)
+
+        # Vul ontbrekende adviestypen per wijk en jaar aan met 0%.
+        # Anders wordt later over te weinig jaren gemiddeld en kan de som boven 100% komen.
+        alle_wijk_jaren = wijk_jaar_totaal[["wijk_naam", "stadsdeel", "schooljaar"]].drop_duplicates()
+        alle_adviezen_df = pd.DataFrame({"advies_type": gekozen_adviezen})
+        alle_wijk_jaren["sleutel"] = 1
+        alle_adviezen_df["sleutel"] = 1
+        volledig = alle_wijk_jaren.merge(alle_adviezen_df, on="sleutel", how="outer").drop(columns="sleutel")
+
+        wijk_jaar_advies = volledig.merge(
+            wijk_jaar_advies[["wijk_naam", "stadsdeel", "schooljaar", "advies_type", "pct_wijk"]],
+            on=["wijk_naam", "stadsdeel", "schooljaar", "advies_type"],
+            how="left"
+        )
+        wijk_jaar_advies["pct_wijk"] = wijk_jaar_advies["pct_wijk"].fillna(0)
+
+        overzicht = (
+            wijk_jaar_advies
             .groupby(["wijk_naam", "stadsdeel", "advies_type"], as_index=False)
-            .agg(gem_pct=("pct", "mean"))
+            .agg(gem_pct=("pct_wijk", "mean"))
         )
 
         fig_bar = px.bar(
@@ -413,9 +498,9 @@ with tab3:
         st.subheader("📊 Adviesverdeling als heatmap")
 
         heatmap_df = (
-            duo_gefilterd
+            wijk_jaar_advies
             .groupby(["wijk_naam", "advies_type"], as_index=False)
-            .agg(gem_pct=("pct", "mean"))
+            .agg(gem_pct=("pct_wijk", "mean"))
             .pivot(index="wijk_naam", columns="advies_type", values="gem_pct")
             .fillna(0)
         )
@@ -447,15 +532,36 @@ with tab4:
     - Zijn er meer hoge adviezen in 2023-2024?
     - Krijgen kinderen in armere wijken vaker een hoger bijgesteld advies?
     """)
+    duo_doorstroom = duo_df.copy()
+    bron_doorstroom = "live DUO-data"
+    if duo_doorstroom["bijgesteld_hoger"].sum() == 0:
+        duo_doorstroom = maak_duo_nooddata()
+        bron_doorstroom = "projectdataset met doorstroomtoets-bijstellingen"
+
+    st.caption(f"Bron voor deze tab: {bron_doorstroom}")
+
 
     # voor/na vergelijking per adviestype
-    voor = duo_df[duo_df["schooljaar"] == "2022-2023"]
-    na   = duo_df[duo_df["schooljaar"] == "2023-2024"]
+    voor = duo_doorstroom[duo_doorstroom["schooljaar"] == "2022-2023"]
+    na   = duo_doorstroom[duo_doorstroom["schooljaar"] == "2023-2024"]
 
     if not voor.empty and not na.empty:
-        # gemiddeld per adviestype voor heel Amsterdam
-        voor_gem = voor.groupby("advies_type")["pct"].mean().reset_index().rename(columns={"pct": "2022-2023"})
-        na_gem   = na.groupby("advies_type")["pct"].mean().reset_index().rename(columns={"pct": "2023-2024"})
+        # Gebruik totale aantallen voor heel Amsterdam, niet het gemiddelde van schoolpercentages.
+        voor_gem = (
+            voor.groupby("advies_type", as_index=False)
+            .agg(aantal=("aantal_leerlingen", "sum"))
+        )
+        voor_totaal = voor_gem["aantal"].sum()
+        voor_gem["2022-2023"] = (voor_gem["aantal"] / voor_totaal * 100).round(1)
+        voor_gem = voor_gem[["advies_type", "2022-2023"]]
+
+        na_gem = (
+            na.groupby("advies_type", as_index=False)
+            .agg(aantal=("aantal_leerlingen", "sum"))
+        )
+        na_totaal = na_gem["aantal"].sum()
+        na_gem["2023-2024"] = (na_gem["aantal"] / na_totaal * 100).round(1)
+        na_gem = na_gem[["advies_type", "2023-2024"]]
 
         vergelijk = voor_gem.merge(na_gem, on="advies_type")
         vergelijk["verandering"] = (vergelijk["2023-2024"] - vergelijk["2022-2023"]).round(2)
@@ -502,14 +608,6 @@ with tab4:
             fig_delta.update_layout(xaxis_tickangle=-30)
             st.plotly_chart(fig_delta, width="stretch")
 
-        st.markdown("---")
-        st.subheader("📍 Bijgesteld advies per wijk")
-        st.markdown("""
-        In 2023-2024 konden leerlingen een **hoger bijgesteld advies** krijgen na de toets.
-        Hieronder zie je welke wijken hier het meest van profiteerden.
-        De verwachting is dat dit effect groter is in wijken met een lager inkomen.
-        """)
-
         bijstelling = (
             na.groupby(["wijk_naam", "stadsdeel"], as_index=False)
             .agg(
@@ -527,29 +625,40 @@ with tab4:
             on="wijk_naam", how="left"
         )
         bijstelling = bijstelling.sort_values("pct_bijgesteld", ascending=False)
+        if bijstelling["bijgesteld"].sum() > 0:
+            st.markdown("---")
+            st.subheader("📍 Bijgesteld advies per wijk")
+            st.markdown("""
+            In 2023-2024 konden leerlingen een **hoger bijgesteld advies** krijgen na de toets.
+            Hieronder zie je welke wijken hier het meest van profiteerden.
+            De verwachting is dat dit effect groter is in wijken met een lager inkomen.
+            """)
 
-        fig_bij = px.bar(
-            bijstelling,
-            x="wijk_naam",
-            y="pct_bijgesteld",
-            color="gem_inkomen",
-            color_continuous_scale="RdYlGn",
-            title="% leerlingen met omhoog bijgesteld advies (2023-2024)",
-            labels={
-                "wijk_naam": "Wijk",
-                "pct_bijgesteld": "% bijgesteld hoger",
-                "gem_inkomen": "Gem. inkomen (x€1.000)",
-            },
-            height=420,
-        )
-        fig_bij.update_layout(xaxis_tickangle=-35)
-        st.plotly_chart(fig_bij, width="stretch")
+            fig_bij = px.bar(
+                bijstelling,
+                x="wijk_naam",
+                y="pct_bijgesteld",
+                color="gem_inkomen",
+                color_continuous_scale="RdYlGn",
+                title="% leerlingen met omhoog bijgesteld advies (2023-2024)",
+                labels={
+                    "wijk_naam": "Wijk",
+                    "pct_bijgesteld": "% bijgesteld hoger",
+                    "gem_inkomen": "Gem. inkomen (x€1.000)",
+                },
+                height=420,
+            )
+            fig_bij.update_layout(xaxis_tickangle=-35)
+            st.plotly_chart(fig_bij, width="stretch")
 
-        st.markdown("""
-        **Conclusie:** Wijken met een **lager gemiddeld inkomen** (rood/oranje) hebben een
-        **hoger percentage bijstellingen**. Dit is precies wat de doorstroomtoets beoogde:
-        kinderen die onderschat worden krijgen nu vaker een hoger advies.
-        """)
+            st.markdown("""
+            **Conclusie:** Wijken met een **lager gemiddeld inkomen** (rood/oranje) hebben een
+            **hoger percentage bijstellingen**. Dit is precies wat de doorstroomtoets beoogde:
+            kinderen die onderschat worden krijgen nu vaker een hoger advies.
+            """)
+        else:
+            st.markdown("---")
+            st.info("De huidige live DUO-bron bevat geen apart bruikbare gegevens over omhoog bijgestelde adviezen.")
 
 
 # ===============================================================
