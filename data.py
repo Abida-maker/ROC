@@ -119,9 +119,6 @@ def koppel_cbs_code_aan_dashboard(wijk_code):
 @st.cache_data(ttl=86400)
 def haal_cbs_data_op():
     # CBS OData v3 API - Kerncijfers Wijken en Buurten 2024 (tabel 85984NED)
-    # We filteren op Amsterdam wijken (code begint met WK0363)
-    # Bron: https://opendata.cbs.nl/ODataApi/odata/85984NED/TypedDataSet
-    # (odata4.cbs.nl doet het niet meer; v3 via opendata.cbs.nl werkt wel)
     url = "https://opendata.cbs.nl/ODataApi/odata/85984NED/TypedDataSet"
     params = {
         "$filter": "startswith(WijkenEnBuurten,'WK0363')",
@@ -136,39 +133,39 @@ def haal_cbs_data_op():
 
         if len(records) > 0:
             df = pd.DataFrame(records)
-            # kolommen hernoemen zodat we ze makkelijk kunnen gebruiken
+
+            # kolomnamen hernoemen naar begrijpelijke namen
             hernoem = {}
-            al_gebruikt = set()  # voorkomt dat twee kolommen dezelfde naam krijgen
+            al_gebruikt = set()
+
             for kolom in df.columns:
                 k = kolom.lower()
                 nieuwe_naam = None
-                # CBS v3: regio-veld heet WijkenEnBuurten; v4 gebruikt RegioS
+
                 if kolom in ("RegioS", "WijkenEnBuurten"):
                     nieuwe_naam = "wijk_code"
                 elif "inkomen" in k and "gemiddeld" in k and "ontvanger" in k:
-                    nieuwe_naam = "gem_inkomen"  # GemiddeldInkomenPerInkomensontvanger
+                    nieuwe_naam = "gem_inkomen"
                 elif "inwoners" in k and "aantal" in k:
                     nieuwe_naam = "aantal_inwoners"
-                elif "nietwester" in k.replace(" ", "").replace("-", "") or \
-                     ("buiten" in k and "europa" in k):
+                elif "nietwester" in k.replace(" ", "").replace("-", "") or ("buiten" in k and "europa" in k):
                     nieuwe_naam = "pct_niet_westers"
-                elif "bijstand" in k or ("uitkering" in k and "relatief" in k) or \
-                     ("bijstand" in k and "personen" in k):
+                elif "bijstand" in k or ("uitkering" in k and "relatief" in k):
                     nieuwe_naam = "pct_uitkering"
-                elif ("basisonderwijs" in k or "vmbo" in k or "mbo1" in k) and \
-                     ("laag" in k or "basis" in k or "vmbo" in k):
+                elif ("basisonderwijs" in k or "vmbo" in k or "mbo1" in k) and ("laag" in k or "basis" in k or "vmbo" in k):
                     nieuwe_naam = "pct_laag_opgeleid"
                 elif ("hbo" in k or "wo" in k) and ("hoog" in k or "hbo" in k):
                     nieuwe_naam = "pct_hoog_opgeleid"
                 elif "woz" in k and "gemiddeld" in k:
                     nieuwe_naam = "gem_woz"
-                if nieuwe_naam and nieuwe_naam not in al_gebruikt:
+
+                if nieuwe_naam is not None and nieuwe_naam not in al_gebruikt:
                     hernoem[kolom] = nieuwe_naam
                     al_gebruikt.add(nieuwe_naam)
+
             df = df.rename(columns=hernoem)
 
-            # verwijder dubbele wijk_code kolom als die er is (RegioS en WijkenEnBuurten
-            # kunnen allebei aanwezig zijn in sommige CBS-versies)
+            # dubbele kolommen verwijderen
             if df.columns.duplicated().any():
                 df = df.loc[:, ~df.columns.duplicated()]
 
@@ -179,6 +176,7 @@ def haal_cbs_data_op():
             nooddata = maak_cbs_nooddata()
             wijk_info = nooddata[["wijk_code", "wijk_naam", "stadsdeel", "lat", "lon"]]
 
+            # alle kolommen numeriek maken
             numerieke_kolommen = []
             overslaan = ["ID", "wijk_code", "wijk_naam", "Gemeentenaam_1", "SoortRegio_2", "Codering_3"]
             for kolom in df.columns:
@@ -188,6 +186,7 @@ def haal_cbs_data_op():
                 if pd.api.types.is_numeric_dtype(df[kolom]):
                     numerieke_kolommen.append(kolom)
 
+            # per wijk samenvatten
             aggregaties = {}
             for kolom in numerieke_kolommen:
                 if kolom == "aantal_inwoners":
@@ -197,26 +196,26 @@ def haal_cbs_data_op():
 
             df = df.groupby("wijk_naam", as_index=False).agg(aggregaties)
 
-            # Een paar live CBS-velden zijn aantallen. Voor dit dashboard maken we daar
-            # eenvoudige percentages van zodat ze beter aansluiten op de rest van de app.
+            # percentages berekenen
             if "pct_niet_westers" in df.columns and "aantal_inwoners" in df.columns:
-                df["pct_niet_westers"] = (df["pct_niet_westers"] / df["aantal_inwoners"] * 100).round(1)
+                df["pct_niet_westers"] = df["pct_niet_westers"] / df["aantal_inwoners"] * 100
+                df["pct_niet_westers"] = df["pct_niet_westers"].round(1)
+
             if "pct_uitkering" in df.columns and "aantal_inwoners" in df.columns:
-                df["pct_uitkering"] = (df["pct_uitkering"] / df["aantal_inwoners"] * 100).round(1)
+                df["pct_uitkering"] = df["pct_uitkering"] / df["aantal_inwoners"] * 100
+                df["pct_uitkering"] = df["pct_uitkering"].round(1)
+
             if "pct_hoog_opgeleid" in df.columns and "pct_laag_opgeleid" in df.columns and "HavoVwoMbo24_68" in df.columns:
                 totaal_opleiding = df["pct_laag_opgeleid"] + df["HavoVwoMbo24_68"] + df["pct_hoog_opgeleid"]
                 df["pct_hoog_opgeleid"] = (df["pct_hoog_opgeleid"] / totaal_opleiding * 100).round(1)
                 df["pct_laag_opgeleid"] = (df["pct_laag_opgeleid"] / totaal_opleiding * 100).round(1)
 
             df = wijk_info.merge(df, on="wijk_naam", how="left")
-
             return df, "Live data van CBS OData API (samengevoegd naar dashboardwijken)"
 
-    except Exception as fout:
-        pass  # als de API niet werkt gaan we door naar de nooddata
+    except Exception:
+        pass
 
-    # als de API niet werkt gebruiken we onze eigen data
-    # deze data is gebaseerd op echte Amsterdamse CBS-cijfers uit 2023
     return maak_cbs_nooddata(), "Eigen data (CBS API niet bereikbaar)"
 
 
@@ -264,7 +263,6 @@ def maak_cbs_nooddata():
 @st.cache_data(ttl=86400)
 def haal_duo_data_op(scholen_df):
     # DUO Open Onderwijsdata - dataset wpoadvies-v1
-    # API documentatie: https://onderwijsdata.duo.nl/api/3/action/
     url = "https://onderwijsdata.duo.nl/api/3/action/package_show"
     params = {"id": "wpoadvies-v1"}
 
@@ -274,76 +272,77 @@ def haal_duo_data_op(scholen_df):
         package = antwoord.json().get("result", {})
         bronnen = package.get("resources", [])
 
-        # zoek de meest recente CSV
-        csv_bestanden = [b for b in bronnen if b.get("format", "").upper() == "CSV"]
+        # zoek alle CSV-bestanden en pak de meest recente
+        csv_bestanden = []
+        for b in bronnen:
+            if b.get("format", "").upper() == "CSV":
+                csv_bestanden.append(b)
+
         if len(csv_bestanden) > 0:
-            nieuwste = sorted(csv_bestanden, key=lambda x: x.get("name", ""), reverse=True)[0]
+            csv_bestanden_gesorteerd = sorted(csv_bestanden, key=lambda x: x.get("name", ""), reverse=True)
+            nieuwste = csv_bestanden_gesorteerd[0]
+
             df = pd.read_csv(
                 nieuwste["url"],
                 sep=",",
                 dtype={"INSTELLINGSCODE": str, "VESTIGINGSCODE": str},
             )
 
-            df["brin"] = (
-                df["INSTELLINGSCODE"].fillna("").str.strip().str.upper() +
-                df["VESTIGINGSCODE"].fillna("").str.zfill(2)
-            )
+            # BRIN samenstellen uit instelling + vestigingscode
+            instelling = df["INSTELLINGSCODE"].fillna("").str.strip().str.upper()
+            vestiging = df["VESTIGINGSCODE"].fillna("").str.zfill(2)
+            df["brin"] = instelling + vestiging
+
+            # schooljaar maken van peiljaar (bijv. 2024 → "2023-2024")
             df["schooljaar"] = (df["PEILJAAR"] - 1).astype(str) + "-" + df["PEILJAAR"].astype(str)
+
+            # adviescodes omzetten naar onze categorieën
             df["advies_type"] = df["ADVIES"].map(DUO_ADVIES_NAAR_TYPE)
             df["aantal_leerlingen"] = pd.to_numeric(df["AANTAL_LEERLINGEN"], errors="coerce").fillna(0)
 
-            df = df[
-                df["schooljaar"].isin(SCHOOLJAREN) &
-                df["advies_type"].notna() &
-                (df["aantal_leerlingen"] >= 0)
-            ].copy()
+            # alleen Amsterdam-data en geldige adviezen
+            geldig_jaar = df["schooljaar"].isin(SCHOOLJAREN)
+            geldig_advies = df["advies_type"].notna()
+            geldig_aantal = df["aantal_leerlingen"] >= 0
+            df = df[geldig_jaar & geldig_advies & geldig_aantal].copy()
 
-            # Koppel live DUO aan de Amsterdam schooldata via BRIN.
+            # koppelen aan schooldata via BRIN
             df = df.merge(
                 scholen_df[["brin", "school_naam", "stadsdeel", "wijk_naam"]],
                 on="brin",
                 how="inner"
             )
 
-            # Gebruik de bekende Amsterdam wijkcodes uit onze vaste wijktabel.
+            # wijkcodes toevoegen vanuit de nooddata
             wijk_info = maak_cbs_nooddata()[["wijk_code", "wijk_naam", "stadsdeel"]]
             df = df.merge(wijk_info, on=["wijk_naam", "stadsdeel"], how="left")
 
             if len(df) > 0 and "wijk_code" in df.columns:
-                df = (
-                    df.groupby(
-                        ["brin", "school_naam", "wijk_code", "wijk_naam", "stadsdeel", "schooljaar", "advies_type"],
-                        as_index=False
-                    )["aantal_leerlingen"]
-                    .sum()
-                )
-                # In deze live DUO-bron zit geen apart veld voor bijgestelde adviezen.
+                groep_kolommen = ["brin", "school_naam", "wijk_code", "wijk_naam", "stadsdeel", "schooljaar", "advies_type"]
+                df = df.groupby(groep_kolommen, as_index=False)["aantal_leerlingen"].sum()
                 df["bijgesteld_hoger"] = 0
                 return df, "Live data van DUO Open Onderwijsdata (adviescodes samengevoegd, bijstelling niet apart beschikbaar)"
 
-    except Exception as fout:
+    except Exception:
         pass
 
-    # als het niet lukt, gebruik zelf gemaakte data
     return maak_duo_nooddata(), "Eigen data (DUO API niet bereikbaar)"
 
 
 def maak_duo_nooddata():
-    # We maken schooladviesdata voor Amsterdam aan
+    # Zelf gemaakte schooladviesdata voor Amsterdam
     # De verhouding per adviestype is gebaseerd op echte DUO-cijfers (2018-2024)
-    # In armere wijken krijgen kinderen vaker een lager advies
-
     rng = np.random.default_rng(42)
     cbs_df = maak_cbs_nooddata()
     rijen = []
 
     for _, wijk in cbs_df.iterrows():
-        # hoe hoger het inkomen, hoe meer havo/vwo adviezen
-        # hoe hoger % niet-westers, hoe meer lage adviezen (systeem-effect)
-        inkomen_score = (wijk["gem_inkomen"] - 15) / 40   # getal tussen 0 en 1
-        nw_score      = wijk["pct_niet_westers"] / 100    # getal tussen 0 en 1
+        # inkomen_score: 0 = arm, 1 = rijk
+        inkomen_score = (wijk["gem_inkomen"] - 15) / 40
+        # nw_score: aandeel niet-westers (0 tot 1)
+        nw_score = wijk["pct_niet_westers"] / 100
 
-        # basis verdeling per adviestype (in procenten, bij elkaar = 100%)
+        # basisverdeling per adviestype in procenten
         verdeling = [
             max(1, 10 - inkomen_score * 8  + nw_score * 5),   # Praktijkonderwijs
             max(1, 16 - inkomen_score * 12 + nw_score * 7),   # VMBO-BBL
@@ -355,9 +354,8 @@ def maak_duo_nooddata():
             max(1,  5 + inkomen_score * 17 - nw_score * 8),   # VWO
         ]
         totaal = sum(verdeling)
-        verdeling = [v / totaal * 100 for v in verdeling]  # normaliseer naar 100%
+        verdeling = [v / totaal * 100 for v in verdeling]
 
-        # aantal scholen in de wijk (rijkere wijken hebben meer scholen)
         n_scholen = max(3, int(8 + inkomen_score * 5))
 
         for school_nr in range(n_scholen):
@@ -366,29 +364,32 @@ def maak_duo_nooddata():
             for jaar in SCHOOLJAREN:
                 jaar_index = SCHOOLJAREN.index(jaar)
 
-                # kleine verbetering per jaar door beleid
+                # kleine jaarlijkse verbetering simuleren
                 verdeling_dit_jaar = verdeling.copy()
-                verdeling_dit_jaar[0] = max(1, verdeling_dit_jaar[0] - jaar_index * 0.15)  # PrO daalt
-                verdeling_dit_jaar[-1] = verdeling_dit_jaar[-1] + jaar_index * 0.1          # VWO stijgt
+                verdeling_dit_jaar[0] = max(1, verdeling_dit_jaar[0] - jaar_index * 0.15)
+                verdeling_dit_jaar[-1] = verdeling_dit_jaar[-1] + jaar_index * 0.1
 
-                # beetje willekeur per school
+                # willekeurige ruis per school toevoegen
                 ruis = rng.normal(0, 2, len(ADVIES_TYPEN))
-                verdeling_dit_jaar = [max(0.5, v + r) for v, r in zip(verdeling_dit_jaar, ruis)]
-                totaal = sum(verdeling_dit_jaar)
-                verdeling_dit_jaar = [v / totaal * 100 for v in verdeling_dit_jaar]
+                verdeling_met_ruis = []
+                for v, r in zip(verdeling_dit_jaar, ruis):
+                    verdeling_met_ruis.append(max(0.5, v + r))
+
+                totaal_jaar = sum(verdeling_met_ruis)
+                verdeling_dit_jaar = [v / totaal_jaar * 100 for v in verdeling_met_ruis]
 
                 totaal_leerlingen = int(rng.integers(40, 110))
 
-                for advies, pct in zip(ADVIES_TYPEN, verdeling_dit_jaar):
+                for i in range(len(ADVIES_TYPEN)):
+                    advies = ADVIES_TYPEN[i]
+                    pct = verdeling_dit_jaar[i]
                     aantal = max(0, int(round(totaal_leerlingen * pct / 100)))
                     if aantal == 0:
                         continue
 
-                    # doorstroomtoets bijstelling (alleen in 2023-2024)
-                    # het idee: kinderen in armere wijken krijgen vaker een hoger advies
+                    # doorstroomtoets bijstelling alleen in 2023-2024
                     bijgesteld = 0
                     if jaar == "2023-2024":
-                        # hoe armer de wijk, hoe groter het effect van de doorstroomtoets
                         kans = max(0.03, 0.18 - inkomen_score * 0.14)
                         bijgesteld = int(round(aantal * kans))
 
@@ -415,8 +416,7 @@ def maak_duo_nooddata():
 
 @st.cache_data(ttl=86400)
 def haal_amsterdam_scholen_op():
-    # Eenvoudige live koppeling met de open schoolgebouwen-API van Amsterdam.
-    # We halen instellingen en accommodaties op en koppelen die via instellingId.
+    # Haal schooldata op van de Amsterdam schoolgebouwen API
     instellingen_url = "https://api.data.amsterdam.nl/v1/schoolgebouwen/instelling/"
     accommodaties_url = "https://api.data.amsterdam.nl/v1/schoolgebouwen/accommodatie/"
 
@@ -435,47 +435,42 @@ def haal_amsterdam_scholen_op():
         instellingen_df = pd.DataFrame(instellingen_records)
         accommodaties_df = pd.DataFrame(accommodaties_records)
 
-        scholen_df = instellingen_df.merge(
-            accommodaties_df[["instellingId", "stadsdeel", "wijk", "adresStraat", "archief", "mIsActief"]].rename(columns={
-                "archief": "archief_accommodatie",
-                "mIsActief": "actief_accommodatie"
-            }),
-            on="instellingId",
-            how="left"
-        )
-
-        scholen_df = scholen_df[
-            scholen_df["brinNummerDuo"].notna() &
-            scholen_df["naam"].notna() &
-            scholen_df["stadsdeel"].notna()
-        ].copy()
-
-        scholen_df = scholen_df[
-            scholen_df["mIsActief"].eq(True) &
-            scholen_df["actief_accommodatie"].eq(True) &
-            (scholen_df["archief"].fillna("Nee") != "Ja") &
-            (scholen_df["archief_accommodatie"].fillna("Nee") != "Ja")
-        ].copy()
-
-        # Voor deze app willen we alleen basisscholen / speciaal basisonderwijs tonen.
-        scholen_df = scholen_df[
-            scholen_df["soort"].fillna("").str.contains("BO|SBO", case=False, regex=True)
-        ].copy()
-
-        scholen_df["brin"] = (
-            scholen_df["brinNummerDuo"]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-        scholen_df = scholen_df.rename(columns={
-            "naam": "school_naam",
-            "wijk": "wijk_naam"
+        # accommodaties hernoemen voor de koppeling
+        accommodaties_klein = accommodaties_df[["instellingId", "stadsdeel", "wijk", "adresStraat", "archief", "mIsActief"]]
+        accommodaties_klein = accommodaties_klein.rename(columns={
+            "archief": "archief_accommodatie",
+            "mIsActief": "actief_accommodatie"
         })
-        scholen_df["wijk_naam"] = scholen_df.apply(
-            lambda rij: koppel_wijk_naam_aan_dashboard(rij["wijk_naam"], rij["stadsdeel"]),
-            axis=1
-        )
+
+        scholen_df = instellingen_df.merge(accommodaties_klein, on="instellingId", how="left")
+
+        # alleen scholen met een BRIN, naam en stadsdeel
+        heeft_brin = scholen_df["brinNummerDuo"].notna()
+        heeft_naam = scholen_df["naam"].notna()
+        heeft_stadsdeel = scholen_df["stadsdeel"].notna()
+        scholen_df = scholen_df[heeft_brin & heeft_naam & heeft_stadsdeel].copy()
+
+        # alleen actieve scholen
+        is_actief = scholen_df["mIsActief"].eq(True)
+        accommodatie_actief = scholen_df["actief_accommodatie"].eq(True)
+        niet_archief = scholen_df["archief"].fillna("Nee") != "Ja"
+        accommodatie_niet_archief = scholen_df["archief_accommodatie"].fillna("Nee") != "Ja"
+        scholen_df = scholen_df[is_actief & accommodatie_actief & niet_archief & accommodatie_niet_archief].copy()
+
+        # alleen basisscholen en speciaal basisonderwijs
+        is_basisschool = scholen_df["soort"].fillna("").str.contains("BO|SBO", case=False, regex=True)
+        scholen_df = scholen_df[is_basisschool].copy()
+
+        # BRIN klaarmaken
+        scholen_df["brin"] = scholen_df["brinNummerDuo"].astype(str).str.strip().str.upper()
+        scholen_df = scholen_df.rename(columns={"naam": "school_naam", "wijk": "wijk_naam"})
+
+        # wijknamen koppelen aan onze dashboardwijken
+        nieuwe_wijk_namen = []
+        for _, rij in scholen_df.iterrows():
+            nieuwe_naam = koppel_wijk_naam_aan_dashboard(rij["wijk_naam"], rij["stadsdeel"])
+            nieuwe_wijk_namen.append(nieuwe_naam)
+        scholen_df["wijk_naam"] = nieuwe_wijk_namen
 
         scholen_df = scholen_df[["brin", "school_naam", "stadsdeel", "wijk_naam", "adresStraat"]]
         scholen_df = scholen_df.drop_duplicates(subset=["brin"]).reset_index(drop=True)
@@ -489,7 +484,7 @@ def haal_amsterdam_scholen_op():
 def maak_amsterdam_scholen_nooddata():
     # Als de gemeente-API niet werkt, gebruiken we de scholen uit de nooddata.
     scholen_df = maak_duo_nooddata().drop_duplicates(subset=["brin"]).copy()
-    scholen_df = scholen_df[["brin", "school_naam", "stadsdeel", "wijk_naam", "lat", "lon"]]
+    scholen_df = scholen_df[["brin", "school_naam", "stadsdeel", "wijk_naam"]]
     return scholen_df.reset_index(drop=True)
 
 
@@ -508,20 +503,32 @@ def haal_amsterdam_wijkgrenzen_op():
         metadata_records = metadata_resp.json().get("_embedded", {}).get("wijken", [])
         geojson = geojson_resp.json()
 
-        stadsdeel_per_cbs = {}
+        # de metadata heeft cbsCode en stadsdeel per identificatie
+        # de GeoJSON heeft cbsCode NIET in properties, maar wel identificatie
+        # daarom bouwen we een koppeltabel op basis van identificatie
+        info_per_identificatie = {}
         for record in metadata_records:
+            identificatie = record.get("identificatie")
             cbs_code = record.get("cbsCode")
             stadsdeel = record.get("_links", {}).get("ligtInStadsdeel", {}).get("title")
-            if cbs_code and stadsdeel:
-                stadsdeel_per_cbs[cbs_code] = stadsdeel
+            if identificatie and stadsdeel:
+                info_per_identificatie[identificatie] = {
+                    "cbs_code": cbs_code,
+                    "stadsdeel": stadsdeel,
+                }
 
         features = []
         rijen = []
         for feature in geojson.get("features", []):
             properties = feature.get("properties", {})
-            cbs_code = properties.get("cbsCode")
             officiele_wijk_naam = properties.get("naam")
-            stadsdeel = stadsdeel_per_cbs.get(cbs_code)
+
+            # identificatie gebruiken om stadsdeel op te zoeken uit de metadata
+            identificatie = properties.get("identificatie")
+            wijk_info = info_per_identificatie.get(identificatie, {})
+            cbs_code = wijk_info.get("cbs_code")
+            stadsdeel = wijk_info.get("stadsdeel")
+
             wijk_naam = koppel_wijk_naam_aan_dashboard(officiele_wijk_naam, stadsdeel)
 
             if not wijk_naam:
@@ -613,140 +620,63 @@ def koppel_wijk_naam_aan_dashboard(wijk_naam, stadsdeel):
     return wijk_naam
 
 
-def voeg_schoollocaties_toe(scholen_df, wijken_df):
-    scholen_df = scholen_df.copy()
-
-    if "lat" in scholen_df.columns and "lon" in scholen_df.columns:
-        return scholen_df
-
-    wijk_centra = wijken_df[["wijk_naam", "stadsdeel", "lat", "lon"]].rename(columns={
-        "lat": "wijk_lat",
-        "lon": "wijk_lon"
-    })
-    stadsdeel_centra = (
-        wijken_df.groupby("stadsdeel", as_index=False)[["lat", "lon"]]
-        .mean()
-        .rename(columns={"lat": "stadsdeel_lat", "lon": "stadsdeel_lon"})
-    )
-
-    scholen_df = scholen_df.merge(wijk_centra, on=["wijk_naam", "stadsdeel"], how="left")
-    scholen_df = scholen_df.merge(stadsdeel_centra, on="stadsdeel", how="left")
-
-    scholen_df["basis_lat"] = scholen_df["wijk_lat"].fillna(scholen_df["stadsdeel_lat"])
-    scholen_df["basis_lon"] = scholen_df["wijk_lon"].fillna(scholen_df["stadsdeel_lon"])
-
-    # De schoolgebouwen-endpoint geeft hier geen bruikbare coordinaten terug.
-    # Daarom zetten we scholen simpel in de buurt van hun wijk/stadsdeel.
-    lat_offsets = []
-    lon_offsets = []
-    for brin in scholen_df["brin"].fillna(""):
-        code = str(brin)
-        nummer = sum((i + 1) * ord(letter) for i, letter in enumerate(code))
-        lat_offsets.append(((nummer % 17) - 8) * 0.0012)
-        lon_offsets.append((((nummer // 17) % 17) - 8) * 0.0015)
-
-    scholen_df["lat"] = scholen_df["basis_lat"] + pd.Series(lat_offsets, index=scholen_df.index)
-    scholen_df["lon"] = scholen_df["basis_lon"] + pd.Series(lon_offsets, index=scholen_df.index)
-
-    scholen_df = scholen_df.drop(columns=[
-        "wijk_lat", "wijk_lon", "stadsdeel_lat", "stadsdeel_lon", "basis_lat", "basis_lon"
-    ])
-
-    scholen_df = scholen_df.dropna(subset=["lat", "lon"]).reset_index(drop=True)
-    return scholen_df
-
-
 # ---------------------------------------------------------------
 # 4. Gecombineerde dataset maken
 # ---------------------------------------------------------------
 
 @st.cache_data(ttl=86400)
 def laad_alle_data():
-    # data ophalen van de drie bronnen
     cbs_df, cbs_bron = haal_cbs_data_op()
     scholen_df, amsterdam_bron = haal_amsterdam_scholen_op()
     duo_df, duo_bron = haal_duo_data_op(scholen_df)
 
-    # als de live DUO data een andere kolomstructuur heeft, gebruik dan onze eigen data
-    # de eigen data heeft altijd wijk_code zodat we kunnen koppelen
     if "wijk_code" not in duo_df.columns:
-        duo_df  = maak_duo_nooddata()
+        duo_df = maak_duo_nooddata()
         duo_bron = "Eigen data (live DUO data heeft andere structuur dan verwacht)"
 
-    # De CBS live API gebruikt een ander wijk-code formaat (bijv. 'WK0363AA') dan
-    # onze nooddata (bijv. 'WK036300'). Daardoor mislukt de koppeling met DUO-data.
-    # We controleren dit door te kijken of de CBS wijk_codes overeenkomen met DUO.
     nooddata = maak_cbs_nooddata()
-    duo_wijken = set(duo_df["wijk_code"].unique())
-    cbs_wijken = set(cbs_df["wijk_code"].str.strip() if "wijk_code" in cbs_df.columns else [])
-    overlap = len(duo_wijken & cbs_wijken)
-    if overlap == 0:
-        # geen overlap → live CBS codes zijn incompatibel met onze data → gebruik nooddata
+    cbs_wijken = set(cbs_df["wijk_code"].astype(str).str.strip()) if "wijk_code" in cbs_df.columns else set()
+    duo_wijken = set(duo_df["wijk_code"].astype(str).str.strip())
+    if not (duo_wijken & cbs_wijken):
         cbs_df = nooddata
         cbs_bron = "Eigen data (CBS wijk-codes komen niet overeen met DUO-data)"
 
-    # als cbs_df geen wijk_naam/stadsdeel/lat/lon heeft, voeg die toe vanuit nooddata
-    ontbrekende_kolommen = [
-        k for k in ["wijk_naam", "stadsdeel", "lat", "lon"]
-        if k not in cbs_df.columns
-    ]
-    if ontbrekende_kolommen:
+    ontbrekende_kolommen = [k for k in ["wijk_naam", "stadsdeel", "lat", "lon"] if k not in cbs_df.columns]
+    if len(ontbrekende_kolommen) > 0:
         extra = nooddata[["wijk_code"] + ontbrekende_kolommen]
         cbs_df = cbs_df.merge(extra, on="wijk_code", how="left")
 
-    # percentages per wijk × jaar × adviestype berekenen
-    totaal_per_wijk_jaar = (
-        duo_df.groupby(["wijk_code", "schooljaar"])["aantal_leerlingen"]
-        .sum()
-        .reset_index()
-        .rename(columns={"aantal_leerlingen": "totaal"})
-    )
+    totaal_per_wijk_jaar = duo_df.groupby(["wijk_code", "schooljaar"])["aantal_leerlingen"].sum()
+    totaal_per_wijk_jaar = totaal_per_wijk_jaar.reset_index()
+    totaal_per_wijk_jaar = totaal_per_wijk_jaar.rename(columns={"aantal_leerlingen": "totaal"})
 
     duo_df = duo_df.merge(totaal_per_wijk_jaar, on=["wijk_code", "schooljaar"])
     duo_df["pct"] = (duo_df["aantal_leerlingen"] / duo_df["totaal"] * 100).round(1)
-    duo_df["pct_bijgesteld"] = (
-        duo_df["bijgesteld_hoger"] / duo_df["aantal_leerlingen"].replace(0, np.nan) * 100
-    ).round(1)
 
-    # wijk-samenvatting voor het laatste jaar (2023-2024)
-    # We gebruiken totale aantallen per wijk, niet het gemiddelde van schoolpercentages.
+    aantal_niet_nul = duo_df["aantal_leerlingen"].replace(0, np.nan)
+    duo_df["pct_bijgesteld"] = (duo_df["bijgesteld_hoger"] / aantal_niet_nul * 100).round(1)
+
     laatste_jaar = duo_df[duo_df["schooljaar"] == "2023-2024"]
-    wijk_advies = (
-        laatste_jaar
-        .groupby(["wijk_code", "advies_type"], as_index=False)
-        .agg(aantal_leerlingen=("aantal_leerlingen", "sum"))
-    )
-    wijk_totaal = (
-        wijk_advies
-        .groupby("wijk_code", as_index=False)
-        .agg(totaal=("aantal_leerlingen", "sum"))
-    )
+    wijk_advies = laatste_jaar.groupby(["wijk_code", "advies_type"], as_index=False)["aantal_leerlingen"].sum()
+    wijk_totaal = wijk_advies.groupby("wijk_code", as_index=False)["aantal_leerlingen"].sum()
+    wijk_totaal = wijk_totaal.rename(columns={"aantal_leerlingen": "totaal"})
     wijk_advies = wijk_advies.merge(wijk_totaal, on="wijk_code", how="left")
-    wijk_advies["pct_wijk"] = (
-        wijk_advies["aantal_leerlingen"] / wijk_advies["totaal"] * 100
-    ).round(1)
-    wijk_advies = (
-        wijk_advies
-        .pivot(index="wijk_code", columns="advies_type", values="pct_wijk")
-        .reset_index()
-    )
+    wijk_advies["pct_wijk"] = (wijk_advies["aantal_leerlingen"] / wijk_advies["totaal"] * 100).round(1)
+    wijk_advies = wijk_advies.pivot(index="wijk_code", columns="advies_type", values="pct_wijk")
+    wijk_advies = wijk_advies.reset_index()
     wijk_advies.columns.name = None
 
-    # cbs data samenvoegen met adviesdata
     wijken_df = cbs_df.merge(wijk_advies, on="wijk_code", how="left")
 
-    # nieuwe variabele: % hoog advies = HAVO + HAVO/VWO + VWO
-    hoog = [k for k in ["HAVO", "HAVO/VWO", "VWO"] if k in wijken_df.columns]
-    laag = [k for k in ["Praktijkonderwijs", "VMBO-BBL", "VMBO-KBL"] if k in wijken_df.columns]
-    wijken_df["pct_hoog_advies"] = wijken_df[hoog].sum(axis=1, min_count=1).round(1)
-    wijken_df["pct_laag_advies"] = wijken_df[laag].sum(axis=1, min_count=1).round(1)
-
-    scholen_df = voeg_schoollocaties_toe(scholen_df, wijken_df)
+    hoog_kolommen = [k for k in ["HAVO", "HAVO/VWO", "VWO"] if k in wijken_df.columns]
+    laag_kolommen = [k for k in ["Praktijkonderwijs", "VMBO-BBL", "VMBO-KBL"] if k in wijken_df.columns]
+    wijken_df["pct_hoog_advies"] = wijken_df[hoog_kolommen].sum(axis=1, min_count=1).round(1)
+    wijken_df["pct_laag_advies"] = wijken_df[laag_kolommen].sum(axis=1, min_count=1).round(1)
 
     bronnen = {
         "CBS Kerncijfers Wijken en Buurten 2024": cbs_bron,
-        "DUO Schooladviezen per school":          duo_bron,
-        "Amsterdam schoolgebouwen":              amsterdam_bron,
+        "DUO Schooladviezen per school": duo_bron,
+        "Amsterdam schoolgebouwen": amsterdam_bron,
     }
 
-    return wijken_df, duo_df, scholen_df, bronnen
+    return wijken_df, duo_df, bronnen
